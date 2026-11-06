@@ -91,6 +91,10 @@ impl Db {
     pub fn open(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
+        // a scan rewrites most rows every time; the rollback journal made that
+        // a file create and delete per statement
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
         let db = Self { conn };
         db.migrate()?;
         Ok(db)
@@ -148,6 +152,47 @@ impl Db {
                  PRAGMA user_version = 1;",
             )?;
         }
+        if version < 2 {
+            self.conn.execute_batch(
+                "CREATE TABLE untracked (
+                     provider TEXT PRIMARY KEY
+                 );
+                 PRAGMA user_version = 2;",
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The providers this machine has been told to ignore.
+    pub fn untracked(&self) -> Result<HashSet<String>> {
+        let mut stmt = self.conn.prepare("SELECT provider FROM untracked")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Stops tracking a provider and forgets what it had found. Its packages
+    /// stay installed; they simply stop being pkginbox's business, and a later
+    /// `track` finds them again from the system.
+    pub fn untrack(&self, provider: &str) -> Result<usize> {
+        self.conn.execute(
+            "INSERT OR IGNORE INTO untracked (provider) VALUES (?1)",
+            params![provider],
+        )?;
+        self.conn.execute(
+            "DELETE FROM observations WHERE provider = ?1",
+            params![provider],
+        )?;
+        Ok(self.conn.execute(
+            "DELETE FROM packages WHERE provider = ?1",
+            params![provider],
+        )?)
+    }
+
+    pub fn track(&self, provider: &str) -> Result<()> {
+        self.conn.execute(
+            "DELETE FROM untracked WHERE provider = ?1",
+            params![provider],
+        )?;
         Ok(())
     }
 

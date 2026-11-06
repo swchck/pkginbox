@@ -60,33 +60,22 @@ struct Gathered {
 /// Each one spends its time waiting on a subprocess — brew, mas, npm, go — so
 /// asking them in sequence added up latencies that overlap perfectly. Nothing
 /// touches the database here: writes stay on the calling thread.
-fn gather(data: &ChezmoiData, signals: &Signals) -> Vec<Gathered> {
-    let providers = provider::all();
+fn gather(data: &ChezmoiData, signals: &Signals, untracked: &HashSet<String>) -> Vec<Gathered> {
+    let providers: Vec<_> = provider::all()
+        .into_iter()
+        .filter(|p| !untracked.contains(p.id()))
+        .collect();
     std::thread::scope(|scope| {
         let handles: Vec<_> = providers
             .iter()
             .map(|p| {
                 scope.spawn(move || {
-                    if !p.available() {
-                        return Gathered {
-                            id: p.id(),
-                            available: false,
-                            installed: Vec::new(),
-                            present: Vec::new(),
-                            declared: HashSet::new(),
-                            last_use: Vec::new(),
-                        };
+                    let started = std::time::Instant::now();
+                    let out = gather_one(p.as_ref(), data, signals);
+                    if std::env::var_os("PKGINBOX_TIMING").is_some() {
+                        eprintln!("{:>8.0?}  {}", started.elapsed(), p.id());
                     }
-                    let installed = p.installed().unwrap_or_default();
-                    let last_use = installed.iter().map(|i| last_use(signals, i)).collect();
-                    Gathered {
-                        id: p.id(),
-                        available: true,
-                        present: p.present().unwrap_or_default(),
-                        declared: p.declared(data).into_iter().collect(),
-                        installed,
-                        last_use,
-                    }
+                    out
                 })
             })
             .collect();
@@ -94,11 +83,43 @@ fn gather(data: &ChezmoiData, signals: &Signals) -> Vec<Gathered> {
     })
 }
 
+fn gather_one(
+    p: &(dyn provider::Provider + Send + Sync),
+    data: &ChezmoiData,
+    signals: &Signals,
+) -> Gathered {
+    {
+        {
+            if !p.available() {
+                return Gathered {
+                    id: p.id(),
+                    available: false,
+                    installed: Vec::new(),
+                    present: Vec::new(),
+                    declared: HashSet::new(),
+                    last_use: Vec::new(),
+                };
+            }
+            let installed = p.installed().unwrap_or_default();
+            let last_use = installed.iter().map(|i| last_use(signals, i)).collect();
+            Gathered {
+                id: p.id(),
+                available: true,
+                present: p.present().unwrap_or_default(),
+                declared: p.declared(data).into_iter().collect(),
+                installed,
+                last_use,
+            }
+        }
+    }
+}
+
 pub fn run(db: &Db, data: &ChezmoiData) -> Result<Summary> {
     let mut summary = Summary::default();
+    let untracked = db.untracked()?;
     let signals = Signals::collect();
 
-    for gathered in gather(data, &signals) {
+    for gathered in gather(data, &signals, &untracked) {
         let id = gathered.id;
         if !gathered.available {
             summary.skipped.push(id.to_string());

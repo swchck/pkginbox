@@ -22,10 +22,15 @@ pub fn capture(bin: &str, args: &[&str]) -> Result<String> {
 
 /// Reports whether an executable of this name is on PATH.
 pub fn has_bin(bin: &str) -> bool {
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|dir| dir.join(bin).is_file())
+    find_bin(bin).is_some()
+}
+
+/// Where an executable of this name sits on PATH.
+pub fn find_bin(bin: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|dir| dir.join(bin))
+        .find(|candidate| candidate.is_file())
 }
 
 pub fn home() -> Result<PathBuf> {

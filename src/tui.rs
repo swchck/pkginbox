@@ -61,6 +61,8 @@ enum Pending {
     Undeclare,
     /// Put a declared package back on this machine.
     Reinstall,
+    /// Stop watching a whole kind of package.
+    Untrack(String),
 }
 
 struct Form {
@@ -221,7 +223,10 @@ impl<'a> App<'a> {
         self.start_scan();
         while !self.quit {
             terminal.draw(|frame| self.draw(frame))?;
-            if event::poll(Duration::from_millis(120))? {
+            // only a running scan needs the loop to wake on its own; idle, the
+            // timeout exists just to notice the terminal being resized
+            let idle = if self.scan.is_some() { 120 } else { 1_000 };
+            if event::poll(Duration::from_millis(idle))? {
                 if let Event::Key(key) = event::read()?
                     && key.kind == KeyEventKind::Press
                 {
@@ -276,6 +281,7 @@ impl<'a> App<'a> {
                 self.start_scan();
                 self.message = Some("rescanning…".into());
             }
+            KeyCode::Char('t') => self.ask_untrack(),
             KeyCode::Char('q') => self.quarantine_selected()?,
             KeyCode::Char('d') => self.dismiss_selected()?,
             KeyCode::Char('x') => self.ask_uninstall(),
@@ -474,11 +480,37 @@ impl<'a> App<'a> {
                     Pending::Uninstall => self.uninstall_selected()?,
                     Pending::Undeclare => self.undeclare_selected()?,
                     Pending::Reinstall => self.reinstall_selected()?,
+                    Pending::Untrack(id) => self.untrack(&id)?,
                 }
             }
             KeyCode::Char('n') | KeyCode::Esc => self.mode = Mode::Browse,
             _ => {}
         }
+        Ok(())
+    }
+
+    /// Untracking is offered on the sources pane, where "go" or "app" is the
+    /// thing in front of you; asking from a package row would read as being
+    /// about that one package.
+    fn ask_untrack(&mut self) {
+        let Some(id) = self.source_id().map(str::to_owned) else {
+            self.message = Some("pick a source first — `all` is every source at once".into());
+            return;
+        };
+        self.mode = Mode::Confirm {
+            prompt: format!(
+                "stop watching {id}? its packages stay installed, pkginbox just forgets them"
+            ),
+            action: Pending::Untrack(id),
+        };
+    }
+
+    fn untrack(&mut self, id: &str) -> Result<()> {
+        let dropped = self.db.untrack(id)?;
+        quarantine::write(self.db, &self.paths.quarantine_brewfile())?;
+        self.source = 0;
+        self.reload()?;
+        self.message = Some(format!("{id} no longer watched ({dropped} forgotten)"));
         Ok(())
     }
 
@@ -721,7 +753,7 @@ impl<'a> App<'a> {
                 Paragraph::new(prompt_lines(text, "Enter to save · Esc to cancel")),
                 5,
             ),
-            Mode::Help => draw_modal(frame, "keys", Paragraph::new(help_text()), 17),
+            Mode::Help => draw_modal(frame, "keys", Paragraph::new(help_text()), 18),
             Mode::Browse => {}
         }
     }
@@ -840,6 +872,7 @@ impl<'a> App<'a> {
             ("x", "remove"),
             ("i", "reinstall"),
             ("e", "note"),
+            ("t", "untrack"),
             ("/", "filter"),
             ("\u{21e5}", "source"),
             ("?", "keys"),
@@ -1022,6 +1055,7 @@ fn help_text() -> Vec<Line<'static>> {
         ("x", "uninstall here, or stop declaring a missing one"),
         ("i", "reinstall a declared package that went missing"),
         ("e", "write a note on why it is here"),
+        ("t", "stop watching this source altogether"),
         ("/", "filter by name"),
         ("Tab", "next source · Shift-Tab previous"),
         ("r", "rescan"),
@@ -1209,6 +1243,22 @@ mod tests {
         assert!(screen.contains("google-chrome"), "{screen}");
         assert!(screen.contains("2 undecided"), "{screen}");
         assert!(screen.contains("1 missing"), "{screen}");
+    }
+
+    #[test]
+    fn untracking_a_source_forgets_its_packages() {
+        let f = fixture();
+        let mut app = app(&f);
+        app.source = app
+            .sources
+            .iter()
+            .position(|(id, _)| id == "cask")
+            .expect("cask source");
+        press(&mut app, KeyCode::Char('t'));
+        assert!(matches!(app.mode, Mode::Confirm { .. }));
+        press(&mut app, KeyCode::Char('y'));
+        assert!(!app.all.iter().any(|p| p.provider == "cask"));
+        assert!(app.db.untracked().unwrap().contains("cask"));
     }
 
     #[test]

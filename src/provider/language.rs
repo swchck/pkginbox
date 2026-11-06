@@ -2,7 +2,6 @@
 //! way under `[packages.<manager>]`.
 
 use anyhow::Result;
-use serde::Deserialize;
 
 use super::{Installed, Provider};
 use crate::chezmoi::ChezmoiData;
@@ -74,15 +73,50 @@ fn with_indented_binaries(
     out
 }
 
-#[derive(Deserialize)]
-struct NpmTree {
-    #[serde(default)]
-    dependencies: std::collections::BTreeMap<String, NpmDep>,
+/// `<prefix>/lib/node_modules`, derived from where `npm` itself sits:
+/// `<prefix>/bin/npm`.
+fn global_node_modules() -> Option<std::path::PathBuf> {
+    let npm = crate::util::find_bin("npm")?;
+    let root = npm.parent()?.parent()?.join("lib/node_modules");
+    root.is_dir().then_some(root)
 }
 
-#[derive(Deserialize)]
-struct NpmDep {
-    version: Option<String>,
+/// Every package directly under `node_modules`, with its version. A `@scope`
+/// directory is not a package; the packages are the directories inside it.
+fn installed_packages(root: &std::path::Path) -> Vec<(String, Option<String>)> {
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        if name.starts_with('.') {
+            continue;
+        }
+        if name.starts_with('@') {
+            let Ok(scoped) = std::fs::read_dir(entry.path()) else {
+                continue;
+            };
+            for inner in scoped.flatten() {
+                let Some(leaf) = inner.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                out.push((format!("{name}/{leaf}"), package_version(&inner.path())));
+            }
+            continue;
+        }
+        out.push((name, package_version(&entry.path())));
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+fn package_version(dir: &std::path::Path) -> Option<String> {
+    let raw = std::fs::read_to_string(dir.join("package.json")).ok()?;
+    let manifest: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    Some(manifest.get("version")?.as_str()?.to_string())
 }
 
 impl Provider for Npm {
@@ -94,19 +128,22 @@ impl Provider for Npm {
         has_bin("npm")
     }
 
+    /// Read from the global `node_modules` directory rather than from
+    /// `npm ls -g`, which spends most of a second starting Node to describe a
+    /// handful of directories that are right there on disk.
     fn installed(&self) -> Result<Vec<Installed>> {
-        let raw = capture("npm", &["ls", "-g", "--depth=0", "--json"])?;
-        let tree: NpmTree = serde_json::from_str(&raw)?;
-        Ok(tree
-            .dependencies
+        let Some(root) = global_node_modules() else {
+            return Ok(Vec::new());
+        };
+        Ok(installed_packages(&root)
             .into_iter()
             // npm and corepack ship with node itself
             .filter(|(name, _)| !matches!(name.as_str(), "npm" | "corepack"))
-            .map(|(name, dep)| {
+            .map(|(name, version)| {
                 // a scoped package's binary is usually its unscoped name
                 let binary = name.rsplit('/').next().unwrap_or(&name).to_string();
                 let mut item = Installed::new(name).with_binary(binary);
-                item.version = dep.version;
+                item.version = version;
                 item
             })
             .collect())

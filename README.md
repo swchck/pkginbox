@@ -44,35 +44,90 @@ pkginbox list         print tracked packages, optionally filtered by status
 pkginbox adopt        write a package into the manifest (`--dry-run` to preview)
 pkginbox quarantine   hold a package through the next cleanup
 pkginbox dismiss      stop tracking a package
+pkginbox sources      show which kinds of package are watched here
+pkginbox untrack      stop watching a kind of package entirely
+pkginbox track        watch it again
 pkginbox brewfile     emit the quarantine Brewfile that protects packages from cleanup
 ```
 
 In the TUI: `a` adopt, `q` hold, `d` leave unmanaged, `x` uninstall (or stop
-declaring a missing package), `i` reinstall, `e` note, `/` filter by name, `Tab`
-to walk the sources, `r` rescan, `?` keys, `Esc` quit.
+declaring a missing package), `i` reinstall, `e` note, `t` stop watching the
+current source, `/` filter by name, `Tab` to walk the sources, `r` rescan,
+`?` keys, `Esc` quit.
 
 It is drawn in One Dark, taken from the colours the shell is already themed
 with, with Nerd Font marks for the sources. A terminal without those fonts shows
 a box where the mark is, not a broken layout.
 
 The interface opens on what the database already knows and refreshes itself when
-the background scan lands. A scan shells out to a dozen package managers, so
-waiting for it before the first frame made every start feel broken.
+the background scan lands, rather than waiting for a scan before the first
+frame.
+
+## Speed
+
+A full scan takes about 0.3 seconds and the process itself holds around 4 MB.
+
+Most of that came from not asking a package manager what it has installed.
+`brew info --json=v2 --installed` costs two and a half seconds of Ruby
+startup, `npm ls -g` most of a second of Node, `claude plugin list` a whole
+second — and all three only report what is already sitting on disk in install
+receipts, in `node_modules`, and in a JSON file. Reading those directly takes
+single-digit milliseconds and answers the same question, in one case better:
+`brew info` quietly omits a formula whose tap has been removed, while the keg
+is still in the Cellar and cleanup would still delete it.
+
+What is left runs in parallel, because each provider spends its time waiting
+rather than computing.
+
+Two providers still shell out, because the information genuinely is not on
+disk in any readable form: `go version -m` reads build metadata embedded in
+each binary, and `mas` talks to the App Store. `chezmoi data` is the third,
+and deliberately so — the manifest is merged by Go templates, and
+re-implementing that merge would be a second source of truth. Those
+subprocesses are also why `/usr/bin/time` reports a much larger peak for a
+scan than pkginbox itself ever uses.
+
+## Nothing is deleted while you are deciding
+
+The install script's `brew bundle cleanup --force` removes anything the
+manifest does not declare, which is every package this tool exists to catch.
+So the Brewfile that cleanup reads gets a second half, listing everything
+pkginbox is holding: packages you have not decided about yet, packages you
+explicitly held, and packages you decided to keep but not declare. Only
+adopting a package — writing it into the manifest — takes it off that list,
+because by then the manifest itself keeps it alive.
+
+That fragment is only ever fed to `cleanup`, never to `brew bundle` itself.
+A package nobody declared must not start installing itself on a new machine.
+
+## Watching less
+
+Not every kind of package is worth tracking on every machine. `pkginbox
+untrack go` stops the Go provider being asked at all — no error, no empty
+section, just one fewer thing to scan — and forgets what it had already
+found. The packages stay installed; they simply stop being pkginbox's
+business. `pkginbox track go` puts it back, and the next scan fills it in
+again from the system. `t` in the interface does the same to whichever source
+is selected.
+
+The setting lives in the local database, because it is a property of the
+machine rather than of the dotfiles: the laptop that never builds Go code and
+the desktop that does should not have to share an answer.
 
 ## What it watches
 
 | Provider | Installed state | Declared in |
 |---|---|---|
-| `brew` | `brew info --json=v2 --installed` | `cli`, `languages` |
-| `cask` | the same call's cask list | `casks`, `fonts` |
-| `tap` | `brew tap` | `taps`, plus tap/trust lines in the install script |
+| `brew` | install receipts in `Cellar` | `cli`, `languages` |
+| `cask` | install receipts in `Caskroom` | `casks`, `fonts` |
+| `tap` | the directories in `Library/Taps` | `taps`, plus tap/trust lines in the install script |
 | `mas` | `mas list` | `appstore_apps` |
 | `go` | `go version -m $GOBIN` | `[packages.go]` |
 | `cargo` | `cargo install --list` | `[packages.cargo]` |
-| `npm` | `npm ls -g --depth=0` | `[packages.npm]` |
+| `npm` | the global `node_modules` directory | `[packages.npm]` |
 | `uv` | `uv tool list` | `[packages.uv]` |
 | `vscode` | `code --list-extensions` | `[vscode] extensions` |
-| `claude` | `claude plugin list` | `[[claude.plugins.install]]` |
+| `claude` | `~/.claude/plugins/installed_plugins.json` | `[[claude.plugins.install]]` |
 | `ollama` | `ollama list` | `[packages.<os>.personal.ollama] models` |
 | `app` | `/Applications`, minus casks and App Store apps | nothing — these cannot be declared |
 

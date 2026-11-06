@@ -61,6 +61,12 @@ enum Command {
     },
     /// Stop tracking a package
     Dismiss { provider: String, key: String },
+    /// Show which kinds of package are watched on this machine
+    Sources,
+    /// Stop watching a kind of package, and forget what it found
+    Untrack { provider: String },
+    /// Watch a kind of package again
+    Track { provider: String },
     /// Write a package into the chezmoi manifest
     Adopt {
         provider: String,
@@ -152,6 +158,16 @@ fn refresh_snapshot(db: &Db, data: &ChezmoiData) {
     }
 }
 
+/// Rejects a provider name nothing would ever report on, so a typo does not
+/// silently become a setting that does nothing.
+fn known(provider: &str) -> Result<()> {
+    if crate::provider::by_id(provider).is_none() {
+        let names: Vec<&str> = crate::provider::all().iter().map(|p| p.id()).collect();
+        anyhow::bail!("unknown source `{provider}` (one of: {})", names.join(", "));
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let paths = Paths::discover()?;
@@ -229,6 +245,30 @@ fn main() -> Result<()> {
             db.set_status(&provider, &key, Status::Dismissed)?;
             quarantine::write(&db, &paths.quarantine_brewfile())?;
             println!("dismissed {provider}/{key}");
+        }
+        Command::Sources => {
+            let untracked = db.untracked()?;
+            for p in provider::all() {
+                let state = if untracked.contains(p.id()) {
+                    "untracked"
+                } else if p.available() {
+                    "watched"
+                } else {
+                    "unavailable"
+                };
+                println!("{:<8} {state}", p.id());
+            }
+        }
+        Command::Untrack { provider } => {
+            known(&provider)?;
+            let dropped = db.untrack(&provider)?;
+            quarantine::write(&db, &paths.quarantine_brewfile())?;
+            println!("no longer watching {provider} ({dropped} records forgotten)");
+        }
+        Command::Track { provider } => {
+            known(&provider)?;
+            db.track(&provider)?;
+            println!("watching {provider} again — run `pkginbox scan` to fill it in");
         }
         Command::Adopt {
             provider,
