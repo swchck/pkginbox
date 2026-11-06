@@ -5,6 +5,7 @@ mod db;
 mod manifest;
 mod provider;
 mod quarantine;
+mod record;
 mod report;
 mod scan;
 mod script;
@@ -76,8 +77,52 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Record an install command, as seen by the shell hook
+    Record {
+        /// The command line that just ran
+        #[arg(long)]
+        shell_command: String,
+        /// Its exit status; anything but 0 is ignored
+        #[arg(long, default_value_t = 0)]
+        status: i32,
+    },
+    /// Attach a note to a package, or clear it with no text
+    Note {
+        provider: String,
+        key: String,
+        text: Vec<String>,
+    },
     /// Regenerate the quarantine Brewfile
     Brewfile,
+}
+
+/// Folds a command the shell hook saw into the inbox.
+///
+/// The manifest is consulted first so that installing something already
+/// declared does not raise a record that the next scan would only have to
+/// close again.
+fn apply_record(db: &Db, paths: &Paths, recorded: &record::Recorded, command: &str) -> Result<()> {
+    let data = ChezmoiData::load()?;
+    let declared: std::collections::HashSet<String> = provider::by_id(recorded.provider)
+        .map(|p| p.declared(&data))
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+
+    for key in &recorded.keys {
+        match (recorded.removal, declared.contains(key)) {
+            (true, true) => db.mark_drifted(recorded.provider, key, None)?,
+            (true, false) => db.set_status(recorded.provider, key, Status::Removed)?,
+            (false, true) => db.mark_managed(recorded.provider, key)?,
+            (false, false) => {
+                db.observe_unmanaged(recorded.provider, key, None, None)?;
+                db.add_observation(recorded.provider, key, "hook", Some(command))?;
+            }
+        }
+    }
+
+    quarantine::write(db, &paths.quarantine_brewfile())?;
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -197,6 +242,25 @@ fn main() -> Result<()> {
                     println!("wrote {}", file.display());
                 }
             }
+        }
+        Command::Record {
+            shell_command,
+            status,
+        } => {
+            if status == 0
+                && let Some(recorded) = record::parse(&shell_command)
+            {
+                apply_record(&db, &paths, &recorded, &shell_command)?;
+            }
+        }
+        Command::Note {
+            provider,
+            key,
+            text,
+        } => {
+            let note = text.join(" ");
+            db.set_note(&provider, &key, Some(note.as_str()))?;
+            println!("noted {provider}/{key}");
         }
         Command::Brewfile => {
             let n = quarantine::write(&db, &paths.quarantine_brewfile())?;

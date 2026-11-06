@@ -73,6 +73,10 @@ pub trait Provider {
     fn declared(&self, data: &ChezmoiData) -> Vec<String>;
 }
 
+pub fn by_id(id: &str) -> Option<Box<dyn Provider>> {
+    all().into_iter().find(|p| p.id() == id)
+}
+
 pub fn all() -> Vec<Box<dyn Provider>> {
     vec![
         Box::new(homebrew::Formula),

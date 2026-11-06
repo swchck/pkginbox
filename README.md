@@ -75,6 +75,34 @@ untrusted tap, so adopting one also adds the matching `brew tap` and
 machine profile you picked. If the manifest stops parsing after an edit, every
 file is restored before anything else happens.
 
+## Catching an install as it happens
+
+A scan can tell that a package appeared; it cannot tell how. The exact
+invocation — `--HEAD`, a pinned `@v1.2.3`, which of two taps a formula came
+from — exists only while the command is running. A fish hook captures it:
+
+```fish
+function __pkginbox_record --on-event fish_postexec
+    set -l exit_status $status
+    pkginbox record --status $exit_status --shell-command $argv[1] &
+end
+```
+
+This is a post-exec event rather than wrapper functions around `brew`, `go` and
+the rest. A wrapper shadows the real binary, so one mistake in it breaks that
+command everywhere — including inside the dotfiles manager's own scripts. The
+event runs after the command and cannot change its result.
+
+The hook only covers interactive fish, which is exactly where packages get
+installed by hand. Anything that happens elsewhere is picked up by the next
+scan, so the two mechanisms cover each other.
+
+Installing something the manifest already declares records nothing: the
+manifest is checked first, so there is no entry for the next scan to close.
+
+`pkginbox note <provider> <key> <text>`, or `e` in the TUI, attaches the reason
+a package is there — the one thing neither mechanism can work out on its own.
+
 ## State
 
 The database lives at `${XDG_STATE_HOME:-~/.local/state}/pkginbox/inbox.db` and is local

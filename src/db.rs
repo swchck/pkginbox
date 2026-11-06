@@ -226,6 +226,46 @@ impl Db {
         Ok(closed)
     }
 
+    /// Records how a package turned up, for the detail view. Scans do not call
+    /// this — only the shell hook, which is the one place the exact invocation
+    /// is still known.
+    pub fn add_observation(
+        &self,
+        provider: &str,
+        key: &str,
+        source: &str,
+        raw_command: Option<&str>,
+    ) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO observations (provider, key, source, raw_command, observed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![provider, key, source, raw_command, now()],
+        )?;
+        Ok(())
+    }
+
+    /// The command that installed this package, when the hook saw it happen.
+    pub fn last_command(&self, provider: &str, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT raw_command FROM observations
+                  WHERE provider = ?1 AND key = ?2 AND raw_command IS NOT NULL
+                  ORDER BY observed_at DESC LIMIT 1",
+                params![provider, key],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn set_note(&self, provider: &str, key: &str, note: Option<&str>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE packages SET note = ?3 WHERE provider = ?1 AND key = ?2",
+            params![provider, key, note.filter(|n| !n.trim().is_empty())],
+        )?;
+        Ok(())
+    }
+
     pub fn set_status(&self, provider: &str, key: &str, status: Status) -> Result<()> {
         self.conn.execute(
             "UPDATE packages SET status = ?3, decided_at = ?4 WHERE provider = ?1 AND key = ?2",

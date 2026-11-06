@@ -27,6 +27,7 @@ pub fn run(db: &Db, paths: &Paths, data: &ChezmoiData, source_dir: &Path) -> Res
 
 enum Mode {
     Browse,
+    Note { text: String },
     Adopt(Form),
     Confirm { prompt: String, action: Pending },
     Help,
@@ -134,6 +135,7 @@ impl<'a> App<'a> {
                 Ok(())
             }
             Mode::Confirm { .. } => self.on_confirm_key(key),
+            Mode::Note { .. } => self.on_note_key(key),
             Mode::Adopt(_) => self.on_form_key(key),
         }
     }
@@ -159,6 +161,7 @@ impl<'a> App<'a> {
             KeyCode::Char('q') => self.quarantine_selected()?,
             KeyCode::Char('d') => self.dismiss_selected()?,
             KeyCode::Char('x') => self.ask_uninstall(),
+            KeyCode::Char('e') => self.open_note(),
             KeyCode::Char('a') | KeyCode::Enter => self.open_form()?,
             _ => {}
         }
@@ -208,6 +211,37 @@ impl<'a> App<'a> {
             prompt: format!("uninstall {} from this machine?", pkg.key),
             action: Pending::Uninstall,
         };
+    }
+
+    fn open_note(&mut self) {
+        let Some(pkg) = self.selected() else { return };
+        self.mode = Mode::Note {
+            text: pkg.note.clone().unwrap_or_default(),
+        };
+    }
+
+    fn on_note_key(&mut self, key: KeyEvent) -> Result<()> {
+        let Mode::Note { text } = &mut self.mode else {
+            return Ok(());
+        };
+        match key.code {
+            KeyCode::Char(c) => text.push(c),
+            KeyCode::Backspace => {
+                text.pop();
+            }
+            KeyCode::Esc => self.mode = Mode::Browse,
+            KeyCode::Enter => {
+                let text = text.clone();
+                self.mode = Mode::Browse;
+                if let Some(pkg) = self.selected() {
+                    let (provider, key) = (pkg.provider.clone(), pkg.key.clone());
+                    self.db.set_note(&provider, &key, Some(text.as_str()))?;
+                    self.reload()?;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     fn on_confirm_key(&mut self, key: KeyEvent) -> Result<()> {
@@ -469,7 +503,7 @@ impl<'a> App<'a> {
                 Style::default().fg(Color::Yellow),
             )),
             None => Line::from(Span::styled(
-                "a adopt · q hold · d leave · x uninstall · r rescan · ? help · Esc quit",
+                "a adopt · q hold · d leave · x uninstall · e note · r rescan · ? help · Esc quit",
                 Style::default().fg(Color::DarkGray),
             )),
         };
@@ -490,7 +524,20 @@ impl<'a> App<'a> {
                 ]),
                 5,
             ),
-            Mode::Help => draw_modal(frame, " keys ", Paragraph::new(help_text()), 12),
+            Mode::Note { text } => draw_modal(
+                frame,
+                " note ",
+                Paragraph::new(vec![
+                    Line::from(format!("{text}_")),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "Enter to save · Esc to cancel",
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                ]),
+                5,
+            ),
+            Mode::Help => draw_modal(frame, " keys ", Paragraph::new(help_text()), 13),
             Mode::Browse => {}
         }
     }
@@ -531,6 +578,18 @@ impl<'a> App<'a> {
                 Span::raw(age(pkg.first_seen)),
             ]),
         ];
+        if let Ok(Some(command)) = self.db.last_command(&pkg.provider, &pkg.key) {
+            lines.push(Line::from(vec![
+                Span::styled("ran     ", Style::default().fg(Color::DarkGray)),
+                Span::raw(command),
+            ]));
+        }
+        if let Some(note) = &pkg.note {
+            lines.push(Line::from(vec![
+                Span::styled("note    ", Style::default().fg(Color::DarkGray)),
+                Span::raw(note.clone()),
+            ]));
+        }
         if let Some(at) = pkg.expires_at {
             lines.push(Line::from(vec![
                 Span::styled("held    ", Style::default().fg(Color::DarkGray)),
@@ -604,6 +663,7 @@ fn help_text() -> Vec<Line<'static>> {
         "q          hold: survive brew cleanup for 30 days",
         "d          leave unmanaged, stop asking",
         "x          uninstall from this machine",
+        "e          write a note on why it is here",
         "r          rescan",
         "Esc        quit",
     ]
@@ -795,6 +855,41 @@ mod tests {
         );
         press(&mut app, KeyCode::Char('j'));
         assert!(matches!(app.mode, Mode::Browse));
+    }
+
+    #[test]
+    fn a_note_is_typed_and_saved() {
+        let f = fixture();
+        let mut app = app(&f);
+        let pending = app
+            .items
+            .iter()
+            .position(|p| p.status == Status::Pending)
+            .unwrap();
+        app.state.select(Some(pending));
+        press(&mut app, KeyCode::Char('e'));
+        for c in "for the demo".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        let screen = render(&mut app);
+        assert!(screen.contains("for the demo"), "{screen}");
+        press(&mut app, KeyCode::Enter);
+        assert!(matches!(app.mode, Mode::Browse));
+        assert_eq!(
+            app.selected().unwrap().note.as_deref(),
+            Some("for the demo")
+        );
+    }
+
+    #[test]
+    fn esc_abandons_a_note() {
+        let f = fixture();
+        let mut app = app(&f);
+        press(&mut app, KeyCode::Char('e'));
+        press(&mut app, KeyCode::Char('x'));
+        press(&mut app, KeyCode::Esc);
+        assert!(matches!(app.mode, Mode::Browse));
+        assert!(app.selected().unwrap().note.is_none());
     }
 
     #[test]
