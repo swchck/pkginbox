@@ -8,6 +8,21 @@ silently removed again by `brew bundle cleanup --force` on the next apply. `pkgi
 notices those packages, keeps them alive while you decide, and writes the ones you keep
 back into the manifest.
 
+## Install
+
+```sh
+brew tap swchck/tap
+brew trust --tap swchck/tap
+brew install swchck/tap/pkginbox
+```
+
+`brew install --build-from-source swchck/tap/pkginbox` compiles the same
+source instead of taking the bottle. Without Homebrew:
+
+```sh
+cargo install --git https://github.com/swchck/pkginbox
+```
+
 ## How it works
 
 Three states per package:
