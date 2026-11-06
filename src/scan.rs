@@ -120,8 +120,27 @@ pub fn run(db: &Db, data: &ChezmoiData) -> Result<Summary> {
     let mut summary = Summary::default();
     let untracked = db.untracked()?;
     let signals = Signals::collect();
+    let gathered_all = gather(data, &signals, &untracked);
 
-    for gathered in gather(data, &signals, &untracked) {
+    db.in_one_go(|| {
+        record(db, &mut summary, gathered_all)?;
+        Ok(())
+    })?;
+
+    for list in summary
+        .unmanaged
+        .values_mut()
+        .chain(summary.drifted.values_mut())
+    {
+        list.sort();
+    }
+    summary.skipped.sort();
+
+    Ok(summary)
+}
+
+fn record(db: &Db, summary: &mut Summary, gathered_all: Vec<Gathered>) -> Result<()> {
+    for gathered in gathered_all {
         let id = gathered.id;
         if !gathered.available {
             summary.skipped.push(id.to_string());
@@ -172,15 +191,5 @@ pub fn run(db: &Db, data: &ChezmoiData) -> Result<Summary> {
 
         db.close_absent(id, &touched)?;
     }
-
-    for list in summary
-        .unmanaged
-        .values_mut()
-        .chain(summary.drifted.values_mut())
-    {
-        list.sort();
-    }
-    summary.skipped.sort();
-
-    Ok(summary)
+    Ok(())
 }

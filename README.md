@@ -65,7 +65,7 @@ frame.
 
 ## Speed
 
-A full scan takes about 0.13 seconds. The process itself holds around 4 MB;
+A full scan takes about 0.1 seconds. The process itself holds around 4 MB;
 `/usr/bin/time` reports a much larger peak, and that is `chezmoi data`, a Go
 binary, not pkginbox.
 
@@ -100,7 +100,31 @@ that could disagree with the real one.
 What is left runs in parallel, including the receipt reading itself, which is
 a few hundred small JSON files and splits across cores for free.
 
+Spotlight is the one cache that ages rather than being stamped against files:
+when an app was last opened changes without any file changing. It is reused
+for an hour, which is far inside the resolution of the only question asked of
+it — whether something has gone untouched for weeks.
+
 `PKGINBOX_TIMING=1 pkginbox scan` prints what each provider cost.
+
+### Things that did not help
+
+Measured, and kept out:
+
+- **Profile-guided optimization.** 165.7 ms to 160.0 ms, inside the noise.
+  The tool spends its time waiting on Spotlight, on `chezmoi` and on the
+  filesystem, not computing, so there is little for a profile to improve.
+  Against that, the formula would have to build twice with a training run in
+  between.
+- **An allocator that never frees**, on the theory that a one-shot tool need
+  not clean up. It was 25% *slower*: nothing can be reused, so every
+  allocation goes back to the kernel for fresh pages.
+- **One transaction per scan** instead of a few hundred. No measurable
+  difference — WAL with `synchronous = NORMAL` had already made the commits
+  cheap. It is in anyway, because it makes a scan atomic: an interrupted one
+  can no longer leave half of a provider's rows updated.
+
+What is left is the floor set by the system calls the tool has to make.
 
 ## What it watches
 

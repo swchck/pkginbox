@@ -159,6 +159,12 @@ fn refresh_snapshot(db: &Db, data: &ChezmoiData) {
     }
 }
 
+/// Writes one line, reporting whether to keep going. `pkginbox list | head`
+/// closes the pipe underneath us, and `println!` turns that into a panic.
+fn emit(out: &mut impl std::io::Write, line: &str) -> bool {
+    writeln!(out, "{line}").is_ok()
+}
+
 /// Rejects a provider name nothing would ever report on, so a typo does not
 /// silently become a setting that does nothing.
 fn known(provider: &str) -> Result<()> {
@@ -219,10 +225,11 @@ fn main() -> Result<()> {
                 Some(s) => db.by_status(Status::parse(&s)?)?,
                 None => db.all()?,
             };
+            let mut out = std::io::stdout().lock();
             for pkg in packages {
                 let version = pkg.version.as_deref().unwrap_or("-");
                 let note = pkg.note.as_deref().unwrap_or("");
-                println!(
+                let line = format!(
                     "{:<12} {:<6} {:<32} {:<14} {:<5} {}",
                     pkg.status,
                     pkg.provider,
@@ -231,6 +238,9 @@ fn main() -> Result<()> {
                     age(pkg.first_seen),
                     note
                 );
+                if !emit(&mut out, &line) {
+                    break;
+                }
             }
         }
         Command::Quarantine {
@@ -249,6 +259,7 @@ fn main() -> Result<()> {
         }
         Command::Sources => {
             let untracked = db.untracked()?;
+            let mut out = std::io::stdout().lock();
             for p in provider::all() {
                 let state = if untracked.contains(p.id()) {
                     "untracked"
@@ -257,7 +268,9 @@ fn main() -> Result<()> {
                 } else {
                     "unavailable"
                 };
-                println!("{:<8} {state}", p.id());
+                if !emit(&mut out, &format!("{:<8} {state}", p.id())) {
+                    break;
+                }
             }
         }
         Command::Untrack { provider } => {

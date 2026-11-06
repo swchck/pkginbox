@@ -163,6 +163,24 @@ impl Db {
         Ok(())
     }
 
+    /// Runs everything a scan writes as one transaction.
+    ///
+    /// A scan rewrites a few hundred rows, and each statement on its own was
+    /// its own transaction: a few hundred WAL commits where one will do.
+    pub fn in_one_go<T>(&self, work: impl FnOnce() -> Result<T>) -> Result<T> {
+        self.conn.execute_batch("BEGIN")?;
+        match work() {
+            Ok(out) => {
+                self.conn.execute_batch("COMMIT")?;
+                Ok(out)
+            }
+            Err(err) => {
+                let _ = self.conn.execute_batch("ROLLBACK");
+                Err(err)
+            }
+        }
+    }
+
     /// The providers this machine has been told to ignore.
     pub fn untracked(&self) -> Result<HashSet<String>> {
         let mut stmt = self.conn.prepare("SELECT provider FROM untracked")?;

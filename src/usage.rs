@@ -85,20 +85,62 @@ fn atuin_history() -> Option<HashMap<String, i64>> {
 }
 
 /// What Spotlight knows about an installed application.
-#[derive(Default, Clone)]
+#[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct AppMeta {
     pub bundle_id: Option<String>,
     pub last_used: Option<i64>,
 }
 
+/// How long a last-used date may be stale. This cache is the one that ages
+/// rather than being stamped against files, because the thing it describes —
+/// when you last opened an app — changes without any file changing. An hour
+/// is far inside the resolution of the only question asked of it: whether a
+/// package has gone untouched for weeks.
+const FRESH_FOR: i64 = 3600;
+
 /// Everything in /Applications, read in a single `mdls` call.
 ///
 /// One call rather than two per bundle: asking Spotlight separately for each
-/// app's identifier and last-used date was sixty processes and most of a
-/// scan's wall clock.
+/// app's identifier and last-used date was sixty processes. Even batched it is
+/// the slowest thing left in a scan, hence the cache.
 pub fn applications() -> &'static HashMap<String, AppMeta> {
     static APPS: OnceLock<HashMap<String, AppMeta>> = OnceLock::new();
-    APPS.get_or_init(|| read_applications().unwrap_or_default())
+    APPS.get_or_init(|| {
+        if let Some(cached) = load_cache() {
+            return cached;
+        }
+        let apps = read_applications().unwrap_or_default();
+        store_cache(&apps);
+        apps
+    })
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AppCache {
+    written_at: i64,
+    apps: HashMap<String, AppMeta>,
+}
+
+fn cache_path() -> Option<std::path::PathBuf> {
+    Some(crate::config::Paths::discover().ok()?.cache("apps"))
+}
+
+fn load_cache() -> Option<HashMap<String, AppMeta>> {
+    let raw = std::fs::read_to_string(cache_path()?).ok()?;
+    let cache: AppCache = serde_json::from_str(&raw).ok()?;
+    let age = crate::util::now() - cache.written_at;
+    (0..FRESH_FOR).contains(&age).then_some(cache.apps)
+}
+
+fn store_cache(apps: &HashMap<String, AppMeta>) {
+    let Some(path) = cache_path() else { return };
+    let cache = AppCache {
+        written_at: crate::util::now(),
+        apps: apps.clone(),
+    };
+    if let Ok(body) = serde_json::to_string(&cache) {
+        let _ = std::fs::write(path, body);
+    }
 }
 
 fn read_applications() -> Option<HashMap<String, AppMeta>> {
