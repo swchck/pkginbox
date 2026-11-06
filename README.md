@@ -65,54 +65,42 @@ frame.
 
 ## Speed
 
-A full scan takes about 0.3 seconds and the process itself holds around 4 MB.
+A full scan takes about 0.13 seconds. The process itself holds around 4 MB;
+`/usr/bin/time` reports a much larger peak, and that is `chezmoi data`, a Go
+binary, not pkginbox.
 
-Most of that came from not asking a package manager what it has installed.
-`brew info --json=v2 --installed` costs two and a half seconds of Ruby
-startup, `npm ls -g` most of a second of Node, `claude plugin list` a whole
-second — and all three only report what is already sitting on disk in install
-receipts, in `node_modules`, and in a JSON file. Reading those directly takes
-single-digit milliseconds and answers the same question, in one case better:
-`brew info` quietly omits a formula whose tap has been removed, while the keg
-is still in the Cellar and cleanup would still delete it.
+Almost all of it came from not asking a package manager what it has installed.
+Every one of them starts a language runtime to print back something already
+sitting on disk in a form that is easier to read:
 
-What is left runs in parallel, because each provider spends its time waiting
-rather than computing.
+| Instead of | Read |
+|---|---|
+| `brew info --json=v2 --installed` (2.3 s) | the install receipts in `Cellar` and `Caskroom` |
+| `claude plugin list` (1.0 s) | `~/.claude/plugins/installed_plugins.json` |
+| `npm ls -g --depth=0` (0.8 s) | the global `node_modules` directory |
+| `cargo install --list` (50 ms) | `~/.cargo/.crates2.json`, which is where cargo keeps it |
 
-Two providers still shell out, because the information genuinely is not on
-disk in any readable form: `go version -m` reads build metadata embedded in
-each binary, and `mas` talks to the App Store. `chezmoi data` is the third,
-and deliberately so — the manifest is merged by Go templates, and
-re-implementing that merge would be a second source of truth. Those
-subprocesses are also why `/usr/bin/time` reports a much larger peak for a
-scan than pkginbox itself ever uses.
+Reading the Cellar is also the more truthful answer: `brew info` quietly omits
+a formula whose tap has been removed, while the keg is still there and cleanup
+would still delete it.
 
-## Nothing is deleted while you are deciding
+Two tools genuinely have to be run, so their answers are cached against a
+stamp of the files they describe — sizes and modification times — and the
+process only starts when that stamp changes:
 
-The install script's `brew bundle cleanup --force` removes anything the
-manifest does not declare, which is every package this tool exists to catch.
-So the Brewfile that cleanup reads gets a second half, listing everything
-pkginbox is holding: packages you have not decided about yet, packages you
-explicitly held, and packages you decided to keep but not declare. Only
-adopting a package — writing it into the manifest — takes it off that list,
-because by then the manifest itself keeps it alive.
+- `go version -m` reads module metadata baked into each binary. Stamped
+  against `$GOBIN`.
+- `mas list` talks to the App Store. Stamped against every application
+  bundle, not only the App Store ones, so the stamp errs towards asking again.
 
-That fragment is only ever fed to `cleanup`, never to `brew bundle` itself.
-A package nobody declared must not start installing itself on a new machine.
+`chezmoi data` is the third, and stays. The manifest is merged by Go
+templates, and re-implementing that merge would be a second source of truth
+that could disagree with the real one.
 
-## Watching less
+What is left runs in parallel, including the receipt reading itself, which is
+a few hundred small JSON files and splits across cores for free.
 
-Not every kind of package is worth tracking on every machine. `pkginbox
-untrack go` stops the Go provider being asked at all — no error, no empty
-section, just one fewer thing to scan — and forgets what it had already
-found. The packages stay installed; they simply stop being pkginbox's
-business. `pkginbox track go` puts it back, and the next scan fills it in
-again from the system. `t` in the interface does the same to whichever source
-is selected.
-
-The setting lives in the local database, because it is a property of the
-machine rather than of the dotfiles: the laptop that never builds Go code and
-the desktop that does should not have to share an answer.
+`PKGINBOX_TIMING=1 pkginbox scan` prints what each provider cost.
 
 ## What it watches
 
@@ -121,9 +109,9 @@ the desktop that does should not have to share an answer.
 | `brew` | install receipts in `Cellar` | `cli`, `languages` |
 | `cask` | install receipts in `Caskroom` | `casks`, `fonts` |
 | `tap` | the directories in `Library/Taps` | `taps`, plus tap/trust lines in the install script |
-| `mas` | `mas list` | `appstore_apps` |
-| `go` | `go version -m $GOBIN` | `[packages.go]` |
-| `cargo` | `cargo install --list` | `[packages.cargo]` |
+| `mas` | `mas list`, cached | `appstore_apps` |
+| `go` | `go version -m $GOBIN`, cached | `[packages.go]` |
+| `cargo` | `~/.cargo/.crates2.json` | `[packages.cargo]` |
 | `npm` | the global `node_modules` directory | `[packages.npm]` |
 | `uv` | `uv tool list` | `[packages.uv]` |
 | `vscode` | `code --list-extensions` | `[vscode] extensions` |
@@ -245,7 +233,8 @@ harness — looks unused because, as far as the shell is concerned, it is.
 
 ## State
 
-The database lives at `${XDG_STATE_HOME:-~/.local/state}/pkginbox/inbox.db` and is local
+The database lives at `${XDG_STATE_HOME:-~/.local/state}/pkginbox/inbox.db`, beside the
+caches described above, and is local
 to the machine. Quarantine is local by nature: a package is installed on one machine, and
 that is the only machine where it needs protection from cleanup.
 

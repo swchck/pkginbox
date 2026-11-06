@@ -70,6 +70,8 @@ fn gather(data: &ChezmoiData, signals: &Signals, untracked: &HashSet<String>) ->
             .iter()
             .map(|p| {
                 scope.spawn(move || {
+                    // PKGINBOX_TIMING prints what each provider cost; the
+                    // slowest one is the scan, since they all run at once
                     let started = std::time::Instant::now();
                     let out = gather_one(p.as_ref(), data, signals);
                     if std::env::var_os("PKGINBOX_TIMING").is_some() {

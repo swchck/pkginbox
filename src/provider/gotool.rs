@@ -1,6 +1,9 @@
+use std::path::Path;
+
 use anyhow::Result;
 
 use super::{Installed, Provider};
+use crate::cache;
 use crate::chezmoi::ChezmoiData;
 use crate::util::{capture, has_bin};
 
@@ -15,14 +18,24 @@ impl Provider for Go {
         has_bin("go")
     }
 
+    /// `go version -m` is the only way to read the module metadata baked into
+    /// a Go binary, and it costs a third of a second of toolchain startup.
+    /// What it reads cannot change unless a binary does, so the answer is
+    /// cached against the directory's file sizes and modification times.
     fn installed(&self) -> Result<Vec<Installed>> {
         let Some(bin_dir) = bin_dir() else {
             return Ok(Vec::new());
         };
+        let stamp = cache::stamp(&cache::entries(Path::new(&bin_dir)));
+        if let Some(hit) = cache::load("go", &stamp) {
+            return Ok(hit);
+        }
         let Ok(raw) = capture("go", &["version", "-m", &bin_dir]) else {
             return Ok(Vec::new());
         };
-        Ok(parse(&raw))
+        let items = parse(&raw);
+        cache::store("go", &stamp, &items);
+        Ok(items)
     }
 
     fn declared(&self, data: &ChezmoiData) -> Vec<String> {

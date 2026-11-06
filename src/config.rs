@@ -30,6 +30,10 @@ impl Paths {
         self.state_dir.join("quarantine.brewfile")
     }
 
+    pub fn cache(&self, name: &str) -> PathBuf {
+        self.state_dir.join(format!("{name}.cache.json"))
+    }
+
     pub fn ensure(&self) -> Result<()> {
         fs::create_dir_all(&self.state_dir)?;
         Ok(())

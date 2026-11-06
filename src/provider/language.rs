@@ -17,11 +17,20 @@ impl Provider for Cargo {
     }
 
     fn available(&self) -> bool {
-        has_bin("cargo")
+        registry().is_some_and(|p| p.is_file()) || has_bin("cargo")
     }
 
+    /// Read from cargo's own record of what it installed rather than from
+    /// `cargo install --list`, which starts the toolchain to print this file
+    /// back in a different shape.
     fn installed(&self) -> Result<Vec<Installed>> {
-        Ok(parse_cargo(&capture("cargo", &["install", "--list"])?))
+        let Some(path) = registry() else {
+            return Ok(Vec::new());
+        };
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            return Ok(Vec::new());
+        };
+        Ok(parse_cargo(&serde_json::from_str(&raw)?))
     }
 
     fn declared(&self, data: &ChezmoiData) -> Vec<String> {
@@ -29,18 +38,46 @@ impl Provider for Cargo {
     }
 }
 
-/// `cargo install --list` prints `name v1.2.3:` per crate, with its binaries
-/// indented underneath. A crate installed from a local path gets its path in
-/// parentheses — the manifest cannot reproduce that, so it is skipped.
-fn parse_cargo(raw: &str) -> Vec<Installed> {
-    with_indented_binaries(raw, |line| {
-        let line = line.trim_end_matches(':').trim();
-        if line.ends_with(')') {
-            return None;
+fn registry() -> Option<std::path::PathBuf> {
+    let home = match std::env::var_os("CARGO_HOME") {
+        Some(dir) => std::path::PathBuf::from(dir),
+        None => crate::util::home().ok()?.join(".cargo"),
+    };
+    Some(home.join(".crates2.json"))
+}
+
+/// `.crates2.json` keys each install as `<name> <version> (<source>)` and
+/// lists the executables it put on PATH. Only crates from a registry are kept:
+/// one installed from a local path or a git URL cannot be reproduced by a
+/// manifest entry that names it.
+fn parse_cargo(registry: &serde_json::Value) -> Vec<Installed> {
+    let Some(installs) = registry.get("installs").and_then(|i| i.as_object()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (spec, entry) in installs {
+        let Some((name, rest)) = spec.split_once(' ') else {
+            continue;
+        };
+        let Some((version, source)) = rest.split_once(' ') else {
+            continue;
+        };
+        if !source.starts_with("(registry+") {
+            continue;
         }
-        let (name, version) = line.split_once(' ')?;
-        Some(Installed::new(name).with_version(version.trim_start_matches('v')))
-    })
+        let mut item = Installed::new(name).with_version(version);
+        item.binaries = entry
+            .get("bins")
+            .and_then(|b| b.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|b| b.as_str())
+            .map(str::to_owned)
+            .collect();
+        out.push(item);
+    }
+    out.sort_by(|a, b| a.key.cmp(&b.key));
+    out
 }
 
 /// Both `cargo install --list` and `uv tool list` print a package per
@@ -193,11 +230,22 @@ fn parse_uv(raw: &str) -> Vec<Installed> {
 mod tests {
     use super::*;
 
+    const REGISTRY: &str = r#"{"installs":{
+        "cargo-update 20.0.0 (registry+https://github.com/rust-lang/crates.io-index)":
+            {"bins":["cargo-install-update","cargo-install-update-config"]},
+        "ripgrep 14.1.1 (registry+https://github.com/rust-lang/crates.io-index)":
+            {"bins":["rg"]},
+        "code-stats-ls 0.4.4 (path+file:///Users/me/code-stats-ls)":
+            {"bins":["code-stats-ls"]}
+    }}"#;
+
+    fn crates() -> Vec<Installed> {
+        parse_cargo(&serde_json::from_str(REGISTRY).unwrap())
+    }
+
     #[test]
     fn reads_crates_and_their_versions() {
-        let got = parse_cargo(
-            "cargo-update v20.0.0:\n    cargo-install-update\nripgrep v14.1.1:\n    rg\n",
-        );
+        let got = crates();
         assert_eq!(got.len(), 2);
         assert_eq!(got[0].key, "cargo-update");
         assert_eq!(got[0].version.as_deref(), Some("20.0.0"));
@@ -205,9 +253,15 @@ mod tests {
 
     #[test]
     fn skips_a_crate_installed_from_a_local_path() {
-        let got =
-            parse_cargo("code-stats-ls v0.4.4 (/Users/me/code-stats-ls):\n    code-stats-ls\n");
-        assert!(got.is_empty());
+        assert!(!crates().iter().any(|c| c.key == "code-stats-ls"));
+    }
+
+    #[test]
+    fn keeps_the_executables_a_crate_installs() {
+        assert_eq!(
+            crates()[0].binaries,
+            vec!["cargo-install-update", "cargo-install-update-config"]
+        );
     }
 
     #[test]
@@ -215,16 +269,5 @@ mod tests {
         let got = parse_uv("ruff v0.17.3\n- ruff\nposting v2.0.0\n- posting\n");
         assert_eq!(got.len(), 2);
         assert_eq!(got[1].key, "posting");
-    }
-
-    #[test]
-    fn keeps_the_executables_a_crate_installs() {
-        let got = parse_cargo(
-            "cargo-update v20.0.0:\n    cargo-install-update\n    cargo-install-update-config\n",
-        );
-        assert_eq!(
-            got[0].binaries,
-            vec!["cargo-install-update", "cargo-install-update-config"]
-        );
     }
 }

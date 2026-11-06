@@ -1,4 +1,5 @@
 mod adopt;
+mod cache;
 mod chezmoi;
 mod config;
 mod db;
