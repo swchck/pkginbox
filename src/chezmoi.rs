@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use serde_json::Value;
@@ -21,6 +22,26 @@ impl ChezmoiData {
             .context("could not read chezmoi data — is chezmoi installed and initialized?")?;
         Ok(Self {
             root: serde_json::from_str(&raw).context("chezmoi data is not valid JSON")?,
+        })
+    }
+
+    /// The chezmoi source directory — where the manifest files live. With a
+    /// `.chezmoiroot` in play this is the subdirectory, not the repository.
+    pub fn source_dir() -> Result<PathBuf> {
+        let raw = capture("chezmoi", &["source-path"])?;
+        Ok(PathBuf::from(raw.trim()))
+    }
+
+    /// Re-reads the data to prove the manifest still parses after an edit.
+    pub fn verify() -> Result<()> {
+        capture("chezmoi", &["data", "--format=json"])?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn from_json(raw: &str) -> Result<Self> {
+        Ok(Self {
+            root: serde_json::from_str(raw)?,
         })
     }
 

@@ -255,6 +255,18 @@ impl Db {
             .collect::<Result<Vec<_>>>()
     }
 
+    pub fn find(&self, provider: &str, key: &str) -> Result<Option<Package>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT provider, key, label, version, status, note, first_seen, expires_at
+               FROM packages WHERE provider = ?1 AND key = ?2",
+        )?;
+        let found = stmt
+            .query_map(params![provider, key], row_to_package)?
+            .next()
+            .transpose()?;
+        found.transpose()
+    }
+
     pub fn all(&self) -> Result<Vec<Package>> {
         let mut stmt = self.conn.prepare(
             "SELECT provider, key, label, version, status, note, first_seen, expires_at

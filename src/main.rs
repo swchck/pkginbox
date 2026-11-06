@@ -1,10 +1,14 @@
+mod adopt;
 mod chezmoi;
 mod config;
 mod db;
+mod manifest;
 mod provider;
 mod quarantine;
 mod report;
 mod scan;
+mod script;
+mod tui;
 mod util;
 
 use anyhow::Result;
@@ -52,6 +56,26 @@ enum Command {
     },
     /// Stop tracking a package
     Dismiss { provider: String, key: String },
+    /// Write a package into the chezmoi manifest
+    Adopt {
+        provider: String,
+        key: String,
+        /// common, personal or work (default: this machine's profile)
+        #[arg(long)]
+        profile: Option<String>,
+        /// Which array to declare it in (cli, languages, casks, fonts, taps)
+        #[arg(long)]
+        list: Option<String>,
+        /// Group heading inside the array
+        #[arg(long)]
+        group: Option<String>,
+        /// Trailing comment (default: `brew desc`)
+        #[arg(long)]
+        comment: Option<String>,
+        /// Show the lines that would be added and write nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Regenerate the quarantine Brewfile
     Brewfile,
 }
@@ -62,7 +86,14 @@ fn main() -> Result<()> {
     paths.ensure()?;
     let db = Db::open(&paths.db())?;
 
-    match cli.command.unwrap_or(Command::Status) {
+    let Some(command) = cli.command else {
+        let data = ChezmoiData::load()?;
+        scan::run(&db, &data)?;
+        quarantine::write(&db, &paths.quarantine_brewfile())?;
+        return tui::run(&db, &paths, &data, &ChezmoiData::source_dir()?);
+    };
+
+    match command {
         Command::Scan { quiet } => {
             let data = ChezmoiData::load()?;
             let summary = scan::run(&db, &data)?;
@@ -124,6 +155,48 @@ fn main() -> Result<()> {
             db.set_status(&provider, &key, Status::Dismissed)?;
             quarantine::write(&db, &paths.quarantine_brewfile())?;
             println!("dismissed {provider}/{key}");
+        }
+        Command::Adopt {
+            provider,
+            key,
+            profile,
+            list,
+            group,
+            comment,
+            dry_run,
+        } => {
+            let data = ChezmoiData::load()?;
+            let pkg = db
+                .find(&provider, &key)?
+                .ok_or_else(|| anyhow::anyhow!("{provider}/{key} is not in the inbox"))?;
+            let profile = adopt::Profile::parse(profile.as_deref().unwrap_or(data.machine_type()))?;
+            let list = list.unwrap_or_else(|| adopt::default_key(&provider, &key).to_string());
+            let comment = match comment {
+                Some(text) => Some(text),
+                None => provider::homebrew::describe(&key, provider == "cask"),
+            };
+            let plan = adopt::plan(&ChezmoiData::source_dir()?, &data, &pkg, profile, &list);
+            let changes = adopt::render(
+                &pkg,
+                &plan,
+                comment.as_deref().filter(|c| !c.is_empty()),
+                group.as_deref(),
+            )?;
+
+            if dry_run {
+                for change in &changes {
+                    for (number, line) in change.added() {
+                        println!("{}:{number}", change.path.display());
+                        println!("+{line}");
+                    }
+                }
+            } else {
+                let files = adopt::commit(&db, &pkg, &changes)?;
+                quarantine::write(&db, &paths.quarantine_brewfile())?;
+                for file in files {
+                    println!("wrote {}", file.display());
+                }
+            }
         }
         Command::Brewfile => {
             let n = quarantine::write(&db, &paths.quarantine_brewfile())?;

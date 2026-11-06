@@ -72,6 +72,26 @@ fn formula_item(f: &BrewFormula) -> Installed {
     item
 }
 
+/// A one-line description for the manifest comment. Missing is fine — a tap or
+/// a cask brew cannot resolve offline simply gets no comment.
+pub fn describe(name: &str, cask: bool) -> Option<String> {
+    let kind = if cask { "--cask" } else { "--formula" };
+    let raw = capture("brew", &["desc", kind, name]).ok()?;
+    let line = raw.lines().next()?.trim();
+    let text = line
+        .split_once(':')
+        .map(|(_, rest)| rest)
+        .unwrap_or(line)
+        .trim();
+    // Casks come back as "token: (Full Name) description"; the full name is
+    // already the thing being declared, so it is noise in the comment.
+    let text = match text.strip_prefix('(').and_then(|rest| rest.split_once(')')) {
+        Some((_, rest)) => rest.trim(),
+        None => text,
+    };
+    Some(text.to_string()).filter(|t| !t.is_empty())
+}
+
 /// The manifest spells tap packages out in full (`derailed/k9s/k9s`) and core
 /// ones short, so the stored key has to follow the same rule or adoption would
 /// write a name brew cannot resolve.

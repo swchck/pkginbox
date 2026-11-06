@@ -25,8 +25,32 @@ Two kinds of drift follow: `installed ∧ ¬declared` (an incoming package to tr
 pkginbox              interactive triage (TUI)
 pkginbox scan         refresh the database from the system and the manifest
 pkginbox status       one-line summary, for the end of `chezmoi apply`
+pkginbox list         print tracked packages, optionally filtered by status
+pkginbox adopt        write a package into the manifest (`--dry-run` to preview)
+pkginbox quarantine   hold a package through the next cleanup
+pkginbox dismiss      stop tracking a package
 pkginbox brewfile     emit the quarantine Brewfile that protects packages from cleanup
 ```
+
+In the TUI: `a` adopt, `q` hold, `d` leave unmanaged, `x` uninstall, `r` rescan,
+`?` keys, `Esc` quit.
+
+## Adoption
+
+Adopting writes the package into the chezmoi manifest and nothing else — the
+manifest stays the source of truth. The edit is line-based rather than a TOML
+rewrite, so it preserves the hand-alignment and the group headings those files
+are kept in, and adds exactly one line:
+
+```
++    "mole",                 # Deep clean and optimize your Mac
+```
+
+A tap needs more than a manifest entry: `brew bundle` refuses formulae from an
+untrusted tap, so adopting one also adds the matching `brew tap` and
+`brew trust --tap` lines to the install script, inside the branch for the
+machine profile you picked. If the manifest stops parsing after an edit, every
+file is restored before anything else happens.
 
 ## State
 
