@@ -32,8 +32,13 @@ pkginbox dismiss      stop tracking a package
 pkginbox brewfile     emit the quarantine Brewfile that protects packages from cleanup
 ```
 
-In the TUI: `a` adopt, `q` hold, `d` leave unmanaged, `x` uninstall, `r` rescan,
-`?` keys, `Esc` quit.
+In the TUI: `a` adopt, `q` hold, `d` leave unmanaged, `x` uninstall (or stop
+declaring a missing package), `i` reinstall, `e` note, `/` filter by name, `Tab`
+to walk the sources, `r` rescan, `?` keys, `Esc` quit.
+
+The interface opens on what the database already knows and refreshes itself when
+the background scan lands. A scan shells out to a dozen package managers, so
+waiting for it before the first frame made every start feel broken.
 
 ## What it watches
 

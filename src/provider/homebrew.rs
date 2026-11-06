@@ -62,17 +62,20 @@ pub fn cask_app_names() -> Result<Vec<String>> {
         .collect())
 }
 
-/// One `brew info` call feeds both the formula and the cask provider; it is the
-/// slowest thing a scan does.
+/// One `brew info` call feeds both the formula and the cask provider; it is
+/// the slowest thing a scan does.
+///
+/// `get_or_init` rather than a check-then-set: the two providers now run on
+/// different threads, and a racing pair would otherwise each pay for their own
+/// two-second call.
 fn info() -> Result<&'static BrewInfo> {
-    static INFO: OnceLock<BrewInfo> = OnceLock::new();
-    if let Some(cached) = INFO.get() {
-        return Ok(cached);
-    }
-    let raw = capture("brew", &["info", "--json=v2", "--installed"])?;
-    let parsed: BrewInfo = serde_json::from_str(&raw).context("unexpected `brew info` output")?;
-    let _ = INFO.set(parsed);
-    Ok(INFO.get().expect("just initialized"))
+    static INFO: OnceLock<Option<BrewInfo>> = OnceLock::new();
+    INFO.get_or_init(|| {
+        let raw = capture("brew", &["info", "--json=v2", "--installed"]).ok()?;
+        serde_json::from_str(&raw).ok()
+    })
+    .as_ref()
+    .context("could not read `brew info --json=v2 --installed`")
 }
 
 /// The commands a formula puts on PATH, read from its keg. The package name is

@@ -5,11 +5,13 @@
 //! commands, and Spotlight's last-used date for applications.
 
 use std::collections::HashMap;
-use std::path::Path;
+use std::sync::OnceLock;
 
 use rusqlite::{Connection, OpenFlags};
 
 use crate::util::{capture, home};
+
+pub const APPLICATIONS: &str = "/Applications";
 
 /// Last use per command name, in seconds since the epoch.
 #[derive(Default)]
@@ -82,20 +84,85 @@ fn atuin_history() -> Option<HashMap<String, i64>> {
     Some(out)
 }
 
+/// What Spotlight knows about an installed application.
+#[derive(Default, Clone)]
+pub struct AppMeta {
+    pub bundle_id: Option<String>,
+    pub last_used: Option<i64>,
+}
+
+/// Everything in /Applications, read in a single `mdls` call.
+///
+/// One call rather than two per bundle: asking Spotlight separately for each
+/// app's identifier and last-used date was sixty processes and most of a
+/// scan's wall clock.
+pub fn applications() -> &'static HashMap<String, AppMeta> {
+    static APPS: OnceLock<HashMap<String, AppMeta>> = OnceLock::new();
+    APPS.get_or_init(|| read_applications().unwrap_or_default())
+}
+
+fn read_applications() -> Option<HashMap<String, AppMeta>> {
+    let mut names: Vec<String> = std::fs::read_dir(APPLICATIONS)
+        .ok()?
+        .filter_map(|entry| {
+            let name = entry.ok()?.file_name().to_str()?.to_string();
+            name.ends_with(".app").then_some(name)
+        })
+        .collect();
+    names.sort();
+    if names.is_empty() {
+        return Some(HashMap::new());
+    }
+
+    let paths: Vec<String> = names
+        .iter()
+        .map(|name| format!("{APPLICATIONS}/{name}"))
+        .collect();
+    let mut args = vec![
+        "-name",
+        "kMDItemCFBundleIdentifier",
+        "-name",
+        "kMDItemLastUsedDate",
+    ];
+    args.extend(paths.iter().map(String::as_str));
+    let raw = capture("mdls", &args).ok()?;
+
+    Some(names.into_iter().zip(parse_mdls(&raw)).collect())
+}
+
+/// `mdls` prints the requested attributes for each file in turn, in the order
+/// the files were given, always one line per attribute — `(null)` when it has
+/// no value — so the blocks line up with the input.
+fn parse_mdls(raw: &str) -> Vec<AppMeta> {
+    let mut out = Vec::new();
+    let mut current = AppMeta::default();
+    let mut seen = 0;
+
+    for line in raw.lines() {
+        let Some((name, value)) = line.split_once('=') else {
+            continue;
+        };
+        let value = value.trim();
+        match name.trim() {
+            "kMDItemCFBundleIdentifier" => {
+                current.bundle_id =
+                    Some(value.trim_matches('"').to_string()).filter(|v| v != "(null)")
+            }
+            "kMDItemLastUsedDate" => current.last_used = parse_mdls_date(value),
+            _ => continue,
+        }
+        seen += 1;
+        if seen == 2 {
+            out.push(std::mem::take(&mut current));
+            seen = 0;
+        }
+    }
+    out
+}
+
 /// Spotlight's last-used date for an application bundle.
 pub fn app_last_use(bundle: &str) -> Option<i64> {
-    let path = Path::new("/Applications").join(bundle);
-    let raw = capture(
-        "mdls",
-        &[
-            "-raw",
-            "-name",
-            "kMDItemLastUsedDate",
-            &path.to_string_lossy(),
-        ],
-    )
-    .ok()?;
-    parse_mdls_date(raw.trim())
+    applications().get(bundle)?.last_used
 }
 
 /// `mdls` prints `2026-11-06 10:23:22 +0000`, or `(null)` for an app that has
@@ -138,6 +205,20 @@ mod tests {
             parse_mdls_date("2026-11-06 10:23:22 +0000"),
             Some(1_793_960_602)
         );
+    }
+
+    #[test]
+    fn splits_mdls_output_per_file() {
+        let raw = "kMDItemCFBundleIdentifier = \"com.github.wez.wezterm\"\n\
+                   kMDItemLastUsedDate       = 2026-11-06 10:23:22 +0000\n\
+                   kMDItemCFBundleIdentifier = \"com.apple.Safari\"\n\
+                   kMDItemLastUsedDate       = (null)\n";
+        let got = parse_mdls(raw);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].bundle_id.as_deref(), Some("com.github.wez.wezterm"));
+        assert_eq!(got[0].last_used, Some(1_793_960_602));
+        assert_eq!(got[1].bundle_id.as_deref(), Some("com.apple.Safari"));
+        assert_eq!(got[1].last_used, None);
     }
 
     #[test]

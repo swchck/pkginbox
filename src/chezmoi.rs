@@ -12,6 +12,7 @@ use crate::util::capture;
 /// the manifest is split across common/personal/work files and merged by Go
 /// templates, and reimplementing that merge here would be a second source of
 /// truth that silently drifts from the install scripts.
+#[derive(Clone)]
 pub struct ChezmoiData {
     root: Value,
 }

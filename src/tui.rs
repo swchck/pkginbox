@@ -1,4 +1,6 @@
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver};
+use std::time::Duration;
 
 use anyhow::Result;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -18,6 +20,24 @@ use crate::{manifest, quarantine};
 
 const QUARANTINE_DAYS: i64 = 30;
 
+/// The scan a background thread runs, with its own database handle.
+fn scan_in_background(
+    db_path: &Path,
+    brewfile: &Path,
+    data: &ChezmoiData,
+    source_dir: &Path,
+) -> Result<String> {
+    let db = Db::open(db_path)?;
+    let summary = crate::scan::run(&db, data)?;
+    quarantine::write(&db, brewfile)?;
+    let _ = crate::export::write(&db, source_dir, data.hostname(), data.machine_type());
+    Ok(format!(
+        "scanned: {} outside the manifest, {} missing",
+        summary.unmanaged_count(),
+        summary.drifted_count()
+    ))
+}
+
 pub fn run(db: &Db, paths: &Paths, data: &ChezmoiData, source_dir: &Path) -> Result<()> {
     let mut terminal = ratatui::init();
     let result = App::new(db, paths, data, source_dir)?.run(&mut terminal);
@@ -27,6 +47,7 @@ pub fn run(db: &Db, paths: &Paths, data: &ChezmoiData, source_dir: &Path) -> Res
 
 enum Mode {
     Browse,
+    Filter { text: String },
     Note { text: String },
     Adopt(Form),
     Confirm { prompt: String, action: Pending },
@@ -67,10 +88,17 @@ struct App<'a> {
     data: &'a ChezmoiData,
     source_dir: PathBuf,
     others: Vec<crate::export::Snapshot>,
+    /// Everything still undecided, before the source and text filters.
+    all: Vec<Package>,
     items: Vec<Package>,
+    sources: Vec<(String, usize)>,
+    source: usize,
+    filter: String,
     state: ListState,
     mode: Mode,
     message: Option<String>,
+    /// Set while a scan runs in the background.
+    scan: Option<Receiver<String>>,
     quit: bool,
 }
 
@@ -82,10 +110,15 @@ impl<'a> App<'a> {
             data,
             source_dir: source_dir.to_path_buf(),
             others: crate::export::read_others(source_dir, data.hostname()),
+            all: Vec::new(),
             items: Vec::new(),
+            sources: Vec::new(),
+            source: 0,
+            filter: String::new(),
             state: ListState::default(),
             mode: Mode::Browse,
             message: None,
+            scan: None,
             quit: false,
         };
         app.reload()?;
@@ -93,8 +126,7 @@ impl<'a> App<'a> {
     }
 
     fn reload(&mut self) -> Result<()> {
-        let keep = self.state.selected().unwrap_or(0);
-        self.items = self
+        self.all = self
             .db
             .all()?
             .into_iter()
@@ -105,11 +137,79 @@ impl<'a> App<'a> {
                 )
             })
             .collect();
+
+        let mut counts: Vec<(String, usize)> = Vec::new();
+        for pkg in &self.all {
+            match counts.iter_mut().find(|(id, _)| *id == pkg.provider) {
+                Some((_, n)) => *n += 1,
+                None => counts.push((pkg.provider.clone(), 1)),
+            }
+        }
+        counts.sort();
+        self.sources = std::iter::once(("all".to_string(), self.all.len()))
+            .chain(counts)
+            .collect();
+        self.source = self.source.min(self.sources.len().saturating_sub(1));
+
+        self.apply_filters();
+        Ok(())
+    }
+
+    fn source_id(&self) -> Option<&str> {
+        match self.sources.get(self.source).map(|(id, _)| id.as_str()) {
+            Some("all") | None => None,
+            Some(id) => Some(id),
+        }
+    }
+
+    fn apply_filters(&mut self) {
+        let keep = self.state.selected().unwrap_or(0);
+        let source = self.source_id().map(str::to_owned);
+        let needle = self.filter.to_lowercase();
+        self.items = self
+            .all
+            .iter()
+            .filter(|p| source.as_deref().is_none_or(|id| p.provider == id))
+            .filter(|p| needle.is_empty() || p.display().to_lowercase().contains(&needle))
+            .cloned()
+            .collect();
         self.state.select(if self.items.is_empty() {
             None
         } else {
             Some(keep.min(self.items.len() - 1))
         });
+    }
+
+    /// Runs a scan on another thread so the list is usable straight away.
+    /// A scan shells out to a dozen package managers; blocking the first frame
+    /// on it made every start feel broken.
+    fn start_scan(&mut self) {
+        if self.scan.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::channel();
+        let db_path = self.paths.db();
+        let brewfile = self.paths.quarantine_brewfile();
+        let data = self.data.clone();
+        let source_dir = self.source_dir.clone();
+        std::thread::spawn(move || {
+            let message = match scan_in_background(&db_path, &brewfile, &data, &source_dir) {
+                Ok(text) => text,
+                Err(err) => first_line(&err.to_string()),
+            };
+            let _ = tx.send(message);
+        });
+        self.scan = Some(rx);
+    }
+
+    fn poll_scan(&mut self) -> Result<()> {
+        let Some(rx) = &self.scan else { return Ok(()) };
+        let Ok(message) = rx.try_recv() else {
+            return Ok(());
+        };
+        self.scan = None;
+        self.reload()?;
+        self.message = Some(message);
         Ok(())
     }
 
@@ -118,12 +218,17 @@ impl<'a> App<'a> {
     }
 
     fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
+        self.start_scan();
         while !self.quit {
             terminal.draw(|frame| self.draw(frame))?;
-            if let Event::Key(key) = event::read()?
-                && key.kind == KeyEventKind::Press
-            {
-                self.on_key(key)?;
+            if event::poll(Duration::from_millis(120))? {
+                if let Event::Key(key) = event::read()?
+                    && key.kind == KeyEventKind::Press
+                {
+                    self.on_key(key)?;
+                }
+            } else {
+                self.poll_scan()?;
             }
         }
         Ok(())
@@ -141,6 +246,7 @@ impl<'a> App<'a> {
                 Ok(())
             }
             Mode::Confirm { .. } => self.on_confirm_key(key),
+            Mode::Filter { .. } => self.on_filter_key(key),
             Mode::Note { .. } => self.on_note_key(key),
             Mode::Adopt(_) => self.on_form_key(key),
         }
@@ -148,21 +254,27 @@ impl<'a> App<'a> {
 
     fn on_browse_key(&mut self, key: KeyEvent) -> Result<()> {
         match key.code {
+            // a filter is the thing Esc is most likely meant for while one is on
+            KeyCode::Esc if !self.filter.is_empty() => {
+                self.filter.clear();
+                self.apply_filters();
+            }
             KeyCode::Esc => self.quit = true,
+            KeyCode::Tab | KeyCode::Right | KeyCode::Char('l') => self.cycle_source(1),
+            KeyCode::BackTab | KeyCode::Left | KeyCode::Char('h') => self.cycle_source(-1),
+            KeyCode::Char('/') => {
+                self.mode = Mode::Filter {
+                    text: self.filter.clone(),
+                }
+            }
             KeyCode::Char('j') | KeyCode::Down => self.state.select_next(),
             KeyCode::Char('k') | KeyCode::Up => self.state.select_previous(),
             KeyCode::Char('g') => self.state.select_first(),
             KeyCode::Char('G') => self.state.select_last(),
             KeyCode::Char('?') => self.mode = Mode::Help,
             KeyCode::Char('r') => {
-                let summary = crate::scan::run(self.db, self.data)?;
-                quarantine::write(self.db, &self.paths.quarantine_brewfile())?;
-                self.reload()?;
-                self.message = Some(format!(
-                    "rescanned: {} outside the manifest, {} missing",
-                    summary.unmanaged_count(),
-                    summary.drifted_count()
-                ));
+                self.start_scan();
+                self.message = Some("rescanning…".into());
             }
             KeyCode::Char('q') => self.quarantine_selected()?,
             KeyCode::Char('d') => self.dismiss_selected()?,
@@ -276,6 +388,46 @@ impl<'a> App<'a> {
             }
             Err(err) => self.message = Some(first_line(&err.to_string())),
         }
+        Ok(())
+    }
+
+    fn cycle_source(&mut self, step: isize) {
+        if self.sources.is_empty() {
+            return;
+        }
+        let len = self.sources.len() as isize;
+        self.source = ((self.source as isize + step).rem_euclid(len)) as usize;
+        self.state.select(Some(0));
+        self.apply_filters();
+    }
+
+    fn on_filter_key(&mut self, key: KeyEvent) -> Result<()> {
+        let Mode::Filter { text } = &mut self.mode else {
+            return Ok(());
+        };
+        match key.code {
+            KeyCode::Char(c) => text.push(c),
+            KeyCode::Backspace => {
+                text.pop();
+            }
+            KeyCode::Esc => {
+                self.mode = Mode::Browse;
+                return Ok(());
+            }
+            KeyCode::Enter => {
+                self.filter = text.clone();
+                self.mode = Mode::Browse;
+                self.state.select(Some(0));
+                self.apply_filters();
+                return Ok(());
+            }
+            _ => return Ok(()),
+        }
+        // filter as you type, so the list answers before you commit to it
+        let text = text.clone();
+        self.filter = text;
+        self.state.select(Some(0));
+        self.apply_filters();
         Ok(())
     }
 
@@ -525,45 +677,71 @@ impl<'a> App<'a> {
             .split(frame.area());
 
         let counts = self.counts();
-        frame.render_widget(
-            Paragraph::new(Line::from(vec![
-                Span::styled("pkginbox", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(format!(
-                    "  {} undecided · {} held · {} declared but missing",
-                    counts.0, counts.1, counts.2
-                )),
-            ])),
-            chunks[0],
-        );
+        let mut header = vec![
+            Span::styled("pkginbox", Style::default().add_modifier(Modifier::BOLD)),
+            Span::raw(format!(
+                "  {} undecided · {} held · {} declared but missing",
+                counts.0, counts.1, counts.2
+            )),
+        ];
+        if self.scan.is_some() {
+            header.push(Span::styled(
+                "  · scanning…",
+                Style::default().fg(Color::Cyan),
+            ));
+        }
+        if !self.filter.is_empty() {
+            header.push(Span::styled(
+                format!("  · /{}", self.filter),
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+        frame.render_widget(Paragraph::new(Line::from(header)), chunks[0]);
 
         let body = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+            .constraints([
+                Constraint::Length(14),
+                Constraint::Min(30),
+                Constraint::Length(38),
+            ])
             .split(chunks[1]);
+
+        let sources: Vec<ListItem> = self
+            .sources
+            .iter()
+            .enumerate()
+            .map(|(idx, (id, count))| {
+                let style = if idx == self.source {
+                    Style::default().add_modifier(Modifier::REVERSED)
+                } else {
+                    Style::default()
+                };
+                ListItem::new(Line::from(Span::styled(
+                    format!("{id:<7}{count:>4} "),
+                    style,
+                )))
+            })
+            .collect();
+        frame.render_widget(
+            List::new(sources).block(Block::default().borders(Borders::ALL).title(" sources ")),
+            body[0],
+        );
 
         let items: Vec<ListItem> = self
             .items
             .iter()
-            .map(|p| {
-                ListItem::new(Line::from(vec![
-                    Span::styled(
-                        format!("{:<5} ", p.provider),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                    Span::raw(format!("{:<34}", p.display())),
-                    Span::styled(status_label(p), Style::default().fg(status_color(p))),
-                ]))
-            })
+            .map(|p| ListItem::new(package_row(p, body[1].width.saturating_sub(2) as usize)))
             .collect();
         frame.render_stateful_widget(
             List::new(items)
                 .block(Block::default().borders(Borders::ALL).title(" packages "))
                 .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
-            body[0],
+            body[1],
             &mut self.state,
         );
 
-        frame.render_widget(self.details(), body[1]);
+        frame.render_widget(self.details(), body[2]);
 
         let hint = match &self.message {
             Some(msg) => Line::from(Span::styled(
@@ -571,7 +749,7 @@ impl<'a> App<'a> {
                 Style::default().fg(Color::Yellow),
             )),
             None => Line::from(Span::styled(
-                "a adopt · q hold · d leave · x remove · i reinstall · e note · r rescan · ? quit Esc",
+                "a adopt · q hold · d leave · x remove · i reinstall · e note · / filter · Tab source · ? keys",
                 Style::default().fg(Color::DarkGray),
             )),
         };
@@ -605,7 +783,20 @@ impl<'a> App<'a> {
                 ]),
                 5,
             ),
-            Mode::Help => draw_modal(frame, " keys ", Paragraph::new(help_text()), 14),
+            Mode::Filter { text } => draw_modal(
+                frame,
+                " filter ",
+                Paragraph::new(vec![
+                    Line::from(format!("{text}_")),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "Enter to keep it · Esc to go back",
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                ]),
+                5,
+            ),
+            Mode::Help => draw_modal(frame, " keys ", Paragraph::new(help_text()), 16),
             Mode::Browse => {}
         }
     }
@@ -755,12 +946,52 @@ fn help_text() -> Vec<Line<'static>> {
         "x          uninstall here, or stop declaring a missing one",
         "i          reinstall a declared package that went missing",
         "e          write a note on why it is here",
+        "/          filter by name",
+        "Tab        next source · Shift-Tab previous",
         "r          rescan",
         "Esc        quit",
     ]
     .into_iter()
     .map(Line::from)
     .collect()
+}
+
+/// Lays out one row inside the width it actually has.
+///
+/// The columns used to be fixed, so a tap-qualified name ran straight into the
+/// status beside it.
+fn package_row(pkg: &Package, width: usize) -> Line<'static> {
+    const PROVIDER: usize = 7;
+    const GAP: usize = 2;
+
+    let status = status_label(pkg);
+    let name_width = width
+        .saturating_sub(PROVIDER + GAP + status.chars().count())
+        .max(8);
+
+    Line::from(vec![
+        Span::styled(
+            format!("{:<PROVIDER$}", fit(&pkg.provider, PROVIDER)),
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::raw(format!(
+            "{:<width$}",
+            fit(pkg.display(), name_width),
+            width = name_width + GAP
+        )),
+        Span::styled(status, Style::default().fg(status_color(pkg))),
+    ])
+}
+
+/// Cuts a string to fit, keeping the end — the distinguishing part of
+/// `someone/their-tap/their-tool` is not its first characters.
+fn fit(text: &str, width: usize) -> String {
+    let len = text.chars().count();
+    if len <= width {
+        return text.to_string();
+    }
+    let keep = width.saturating_sub(1);
+    format!("…{}", text.chars().skip(len - keep).collect::<String>())
 }
 
 fn status_label(pkg: &Package) -> String {
@@ -849,6 +1080,20 @@ mod tests {
 
     fn app(f: &Fixture) -> App<'_> {
         App::new(&f.db, &f.paths, &f.data, Path::new("/nonexistent")).unwrap()
+    }
+
+    fn pkg(key: &str) -> Package {
+        Package {
+            provider: "brew".into(),
+            key: key.into(),
+            label: None,
+            version: None,
+            status: Status::Pending,
+            note: None,
+            first_seen: 0,
+            expires_at: None,
+            last_used: None,
+        }
     }
 
     fn press(app: &mut App<'_>, code: KeyCode) {
@@ -985,6 +1230,50 @@ mod tests {
         press(&mut app, KeyCode::Esc);
         assert!(matches!(app.mode, Mode::Browse));
         assert!(app.selected().unwrap().note.is_none());
+    }
+
+    #[test]
+    fn a_long_name_never_runs_into_the_status() {
+        let mut pkg = pkg("armgabrielyan/deadbranch/deadbranch");
+        pkg.status = Status::Drifted;
+        let row = package_row(&pkg, 40);
+        let text: String = row.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.chars().count() <= 40, "{text:?}");
+        assert!(text.contains("  missing"), "{text:?}");
+    }
+
+    #[test]
+    fn fitting_keeps_the_telling_end_of_a_name() {
+        assert_eq!(fit("someone/their-tap/tool", 10), "…-tap/tool");
+        assert_eq!(fit("short", 10), "short");
+    }
+
+    #[test]
+    fn tab_narrows_the_list_to_one_source() {
+        let f = fixture();
+        let mut app = app(&f);
+        assert_eq!(app.sources[0].0, "all");
+        press(&mut app, KeyCode::Tab);
+        let source = app.sources[app.source].0.clone();
+        assert!(app.items.iter().all(|p| p.provider == source), "{source}");
+        assert!(app.items.len() < app.all.len());
+    }
+
+    #[test]
+    fn a_typed_filter_narrows_as_you_type_and_esc_clears_it() {
+        let f = fixture();
+        let mut app = app(&f);
+        press(&mut app, KeyCode::Char('/'));
+        for c in "chrome".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        press(&mut app, KeyCode::Enter);
+        assert_eq!(app.items.len(), 1);
+        assert_eq!(app.items[0].key, "google-chrome");
+
+        press(&mut app, KeyCode::Esc);
+        assert!(!app.quit, "esc should clear the filter before it quits");
+        assert_eq!(app.items.len(), app.all.len());
     }
 
     #[test]

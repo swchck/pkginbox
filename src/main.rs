@@ -158,10 +158,9 @@ fn main() -> Result<()> {
     let db = Db::open(&paths.db())?;
 
     let Some(command) = cli.command else {
+        // no scan here: the interface opens on what the database already knows
+        // and refreshes itself once the background scan lands
         let data = ChezmoiData::load()?;
-        scan::run(&db, &data)?;
-        quarantine::write(&db, &paths.quarantine_brewfile())?;
-        refresh_snapshot(&db, &data);
         return tui::run(&db, &paths, &data, &ChezmoiData::source_dir()?);
     };
 
