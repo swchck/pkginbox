@@ -225,9 +225,11 @@ Scans refresh the snapshot but never commit it; committing behind your back in
 your own dotfiles repository is not something a status line should do.
 `pkginbox export` is the command that commits it deliberately.
 
-Note that the snapshot lists what is installed on the machine, hand-installed
-applications included. In a public dotfiles repository that is a longer list
-than the manifest itself.
+Applications are left out. A bundle dragged out of a disk image has no
+manifest entry for another machine to have an opinion about, so the entry
+would say nothing — and a dotfiles repository is often public, which makes a
+list of every application on a work laptop something not to publish by
+accident.
 
 ## Is it actually being used?
 

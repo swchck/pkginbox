@@ -48,10 +48,21 @@ pub fn path_for(source_dir: &Path, hostname: &str) -> PathBuf {
         .join(format!("{hostname}.json"))
 }
 
+/// Providers whose entries never leave the machine.
+///
+/// A snapshot answers "what did the other machine decide about this package",
+/// and an application dragged out of a disk image has no manifest entry for
+/// any machine to decide about — the README says as much. So the entry would
+/// be useless anyway, and it is worse than useless: the dotfiles repository
+/// may well be public, and a list of every application on a work laptop is
+/// not something to publish by accident.
+const LOCAL_ONLY: [&str; 1] = ["app"];
+
 pub fn write(db: &Db, source_dir: &Path, hostname: &str, machine_type: &str) -> Result<PathBuf> {
     let packages = db
         .all()?
         .into_iter()
+        .filter(|p| !LOCAL_ONLY.contains(&p.provider.as_str()))
         .map(|p| Entry {
             provider: p.provider,
             key: p.key,
@@ -159,6 +170,24 @@ mod tests {
                 note: None,
             }],
         }
+    }
+
+    #[test]
+    fn applications_stay_on_the_machine_they_are_installed_on() {
+        let db = Db::open_in_memory().unwrap();
+        db.observe_unmanaged("brew", "mole", None, None).unwrap();
+        db.observe_unmanaged("app", "FortiClient.app", Some("FortiClient"), None)
+            .unwrap();
+
+        let dir = std::env::temp_dir().join(format!("pkginbox-export-{}", std::process::id()));
+        let source = dir.join("src");
+        std::fs::create_dir_all(&source).unwrap();
+        let path = write(&db, &source, "laptop", "personal").unwrap();
+
+        let written: Snapshot =
+            serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let keys: Vec<&str> = written.packages.iter().map(|p| p.key.as_str()).collect();
+        assert_eq!(keys, vec!["mole"]);
     }
 
     #[test]
