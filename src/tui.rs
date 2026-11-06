@@ -646,6 +646,14 @@ impl<'a> App<'a> {
                 Span::raw(age(pkg.first_seen)),
             ]),
         ];
+        lines.push(Line::from(vec![
+            Span::styled("used    ", Style::default().fg(Color::DarkGray)),
+            Span::raw(match pkg.last_used {
+                None => "no way to tell".to_string(),
+                Some(0) => "never".to_string(),
+                Some(at) => format!("{} ago", age(at)),
+            }),
+        ]));
         if let Ok(Some(command)) = self.db.last_command(&pkg.provider, &pkg.key) {
             lines.push(Line::from(vec![
                 Span::styled("ran     ", Style::default().fg(Color::DarkGray)),
@@ -759,6 +767,9 @@ fn status_label(pkg: &Package) -> String {
     match pkg.status {
         Status::Quarantined => format!("held {}", age(pkg.first_seen)),
         Status::Drifted => "missing".into(),
+        _ if pkg.never_used(crate::report::SETTLED) => {
+            format!("{} · never used", age(pkg.first_seen))
+        }
         _ => age(pkg.first_seen),
     }
 }
@@ -767,6 +778,7 @@ fn status_color(pkg: &Package) -> Color {
     match pkg.status {
         Status::Quarantined => Color::Cyan,
         Status::Drifted => Color::Red,
+        _ if pkg.never_used(crate::report::SETTLED) => Color::Yellow,
         _ => Color::DarkGray,
     }
 }

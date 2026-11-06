@@ -5,6 +5,26 @@ use anyhow::Result;
 use crate::chezmoi::ChezmoiData;
 use crate::db::Db;
 use crate::provider;
+use crate::usage::{self, Signals};
+
+/// Shell history for a command, Spotlight for an application.
+///
+/// `None` means nothing can be said: a tap, a font or an editor extension runs
+/// nothing and opens nothing. `Some(0)` means the signal exists and found no
+/// use at all — the difference is what makes "installed, never used" safe to
+/// print.
+fn last_use(signals: &Signals, item: &provider::Installed) -> Option<i64> {
+    if !item.has_usage_signal() {
+        return None;
+    }
+    if let Some(app) = &item.app {
+        return Some(usage::app_last_use(app).unwrap_or(0));
+    }
+    if signals.is_empty() {
+        return None;
+    }
+    Some(signals.command_last_use(&item.binaries).unwrap_or(0))
+}
 
 #[derive(Default)]
 pub struct Summary {
@@ -27,6 +47,7 @@ impl Summary {
 
 pub fn run(db: &Db, data: &ChezmoiData) -> Result<Summary> {
     let mut summary = Summary::default();
+    let signals = Signals::collect();
 
     for provider in provider::all() {
         let id = provider.id();
@@ -60,6 +81,7 @@ pub fn run(db: &Db, data: &ChezmoiData) -> Result<Summary> {
                 summary.new_count += 1;
             }
             touched.insert(item.key.clone());
+            db.set_last_used(id, &item.key, last_use(&signals, item))?;
             summary
                 .unmanaged
                 .entry(id.to_string())

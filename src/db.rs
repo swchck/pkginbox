@@ -64,12 +64,22 @@ pub struct Package {
     pub note: Option<String>,
     pub first_seen: i64,
     pub expires_at: Option<i64>,
+    /// Last time the package's command was run or its app opened, when a
+    /// signal for it exists at all.
+    pub last_used: Option<i64>,
 }
 
 impl Package {
     /// The name to show: App Store ids and the like are unreadable on their own.
     pub fn display(&self) -> &str {
         self.label.as_deref().unwrap_or(&self.key)
+    }
+
+    /// Installed a while ago and not used once since. `Some(0)` is the signal
+    /// saying the history was searched and came back empty, which is what
+    /// separates this from a package nothing can be said about.
+    pub fn never_used(&self, settled_for: i64) -> bool {
+        self.last_used == Some(0) && now() - self.first_seen >= settled_for
     }
 }
 
@@ -258,6 +268,14 @@ impl Db {
             .optional()?)
     }
 
+    pub fn set_last_used(&self, provider: &str, key: &str, at: Option<i64>) -> Result<()> {
+        self.conn.execute(
+            "UPDATE packages SET last_used = ?3 WHERE provider = ?1 AND key = ?2",
+            params![provider, key, at],
+        )?;
+        Ok(())
+    }
+
     pub fn set_note(&self, provider: &str, key: &str, note: Option<&str>) -> Result<()> {
         self.conn.execute(
             "UPDATE packages SET note = ?3 WHERE provider = ?1 AND key = ?2",
@@ -286,7 +304,7 @@ impl Db {
 
     pub fn by_status(&self, status: Status) -> Result<Vec<Package>> {
         let mut stmt = self.conn.prepare(
-            "SELECT provider, key, label, version, status, note, first_seen, expires_at
+            "SELECT provider, key, label, version, status, note, first_seen, expires_at, last_used
                FROM packages WHERE status = ?1 ORDER BY provider, key",
         )?;
         let rows = stmt.query_map(params![status.as_str()], row_to_package)?;
@@ -297,7 +315,7 @@ impl Db {
 
     pub fn find(&self, provider: &str, key: &str) -> Result<Option<Package>> {
         let mut stmt = self.conn.prepare(
-            "SELECT provider, key, label, version, status, note, first_seen, expires_at
+            "SELECT provider, key, label, version, status, note, first_seen, expires_at, last_used
                FROM packages WHERE provider = ?1 AND key = ?2",
         )?;
         let found = stmt
@@ -309,7 +327,7 @@ impl Db {
 
     pub fn all(&self) -> Result<Vec<Package>> {
         let mut stmt = self.conn.prepare(
-            "SELECT provider, key, label, version, status, note, first_seen, expires_at
+            "SELECT provider, key, label, version, status, note, first_seen, expires_at, last_used
                FROM packages ORDER BY provider, key",
         )?;
         let rows = stmt.query_map([], row_to_package)?;
@@ -333,6 +351,7 @@ fn row_to_package(row: &rusqlite::Row<'_>) -> rusqlite::Result<RowResult> {
             note: row.get(5)?,
             first_seen: row.get(6)?,
             expires_at: row.get(7)?,
+            last_used: row.get(8)?,
         })
     })())
 }
@@ -382,6 +401,43 @@ mod tests {
         db.mark_drifted("brew", "ripgrep", None).unwrap();
         assert!(!db.observe_unmanaged("brew", "ripgrep", None, None).unwrap());
         assert_eq!(db.by_status(Status::Pending).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn never_used_needs_both_a_searched_history_and_some_age() {
+        let db = Db::open_in_memory().unwrap();
+        db.observe_unmanaged("brew", "vgmstream", None, None)
+            .unwrap();
+        db.set_last_used("brew", "vgmstream", Some(0)).unwrap();
+
+        let settled = 86_400 * 14;
+        let fresh = &db.by_status(Status::Pending).unwrap()[0];
+        assert!(!fresh.never_used(settled), "just installed is not unused");
+
+        db.conn
+            .execute(
+                "UPDATE packages SET first_seen = ?1",
+                params![now() - 86_400 * 30],
+            )
+            .unwrap();
+        let old = &db.by_status(Status::Pending).unwrap()[0];
+        assert!(old.never_used(settled));
+    }
+
+    #[test]
+    fn a_package_with_no_usage_signal_is_never_called_unused() {
+        let db = Db::open_in_memory().unwrap();
+        db.observe_unmanaged("tap", "someone/tap", None, None)
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE packages SET first_seen = ?1",
+                params![now() - 86_400 * 90],
+            )
+            .unwrap();
+        let pkg = &db.by_status(Status::Pending).unwrap()[0];
+        assert_eq!(pkg.last_used, None);
+        assert!(!pkg.never_used(86_400 * 14));
     }
 
     #[test]

@@ -138,6 +138,32 @@ Note that the snapshot lists what is installed on the machine, hand-installed
 applications included. In a public dotfiles repository that is a longer list
 than the manifest itself.
 
+## Is it actually being used?
+
+Neither the manifest nor the inbox can tell a tool you reach for daily from one
+you installed once and forgot. Two signals can: atuin's shell history for
+commands, and Spotlight's last-used date for applications.
+
+The package name is usually not the command name — ripgrep installs `rg`,
+rm-improved installs `rip` — so the commands come from the package itself: the
+keg's `bin` for a formula, the executables `cargo install --list` and
+`uv tool list` print under each entry, the last path segment for a Go tool.
+
+Three outcomes, kept apart on purpose:
+
+- a timestamp — last run or opened then
+- never — the history was searched and found nothing
+- nothing at all — this kind of package runs nothing and opens nothing, so
+  there is no honest answer. Taps, fonts and editor extensions land here.
+
+That distinction is what makes "installed and never used" safe to print: it is
+only ever said about a package whose history was actually searched, and only
+after it has been around long enough for the absence to mean something.
+
+The signal sees commands you typed. A tool invoked by an editor, a script or
+another tool — a debugger launched from the IDE, a linter run by a test
+harness — looks unused because, as far as the shell is concerned, it is.
+
 ## State
 
 The database lives at `${XDG_STATE_HOME:-~/.local/state}/pkginbox/inbox.db` and is local

@@ -75,9 +75,32 @@ fn info() -> Result<&'static BrewInfo> {
     Ok(INFO.get().expect("just initialized"))
 }
 
+/// The commands a formula puts on PATH, read from its keg. The package name is
+/// often not one of them: ripgrep installs `rg`, rm-improved installs `rip`.
+fn formula_binaries(name: &str) -> Vec<String> {
+    static PREFIX: OnceLock<Option<String>> = OnceLock::new();
+    let prefix = PREFIX.get_or_init(|| {
+        std::env::var("HOMEBREW_PREFIX").ok().or_else(|| {
+            capture("brew", &["--prefix"])
+                .ok()
+                .map(|p| p.trim().to_string())
+        })
+    });
+    let Some(prefix) = prefix else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(format!("{prefix}/opt/{name}/bin")) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(|entry| Some(entry.ok()?.file_name().to_str()?.to_string()))
+        .collect()
+}
+
 fn formula_item(f: &BrewFormula) -> Installed {
     let key = canonical(&f.name, &f.full_name, &f.tap);
     let mut item = Installed::new(key);
+    item.binaries = formula_binaries(&f.name);
     if let Some(install) = f.installed.first() {
         item.version = Some(install.version.clone());
     }
@@ -177,6 +200,12 @@ impl Provider for Cask {
                 if let Some(version) = &c.installed {
                     item.version = Some(version.clone());
                 }
+                item.app = c
+                    .artifacts
+                    .iter()
+                    .filter_map(|a| a.get("app")?.as_array()?.first()?.as_str())
+                    .next()
+                    .map(str::to_owned);
                 item.aliases.push(c.token.clone());
                 item.aliases.push(c.full_token.clone());
                 item.aliases.extend(c.old_tokens.iter().cloned());

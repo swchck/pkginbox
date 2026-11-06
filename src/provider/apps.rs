@@ -40,7 +40,11 @@ impl Provider for Apps {
             if path.join("Contents").join("_MASReceipt").exists() || is_apple(&path) {
                 continue;
             }
-            out.push(Installed::new(name).with_label(name.trim_end_matches(".app")));
+            out.push(
+                Installed::new(name)
+                    .with_label(name.trim_end_matches(".app"))
+                    .with_app(name),
+            );
         }
         out.sort_by(|a, b| a.key.cmp(&b.key));
         Ok(out)

@@ -12,6 +12,7 @@ mod report;
 mod scan;
 mod script;
 mod tui;
+mod usage;
 mod util;
 
 use anyhow::Result;

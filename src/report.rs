@@ -5,6 +5,9 @@ use crate::util::now;
 
 /// How many package names the summary line names before it gives up and counts.
 const SAMPLE: usize = 3;
+/// How long a package has to have been around before never having been used
+/// says anything. Something installed this morning has not been used yet.
+pub const SETTLED: i64 = 86_400 * 14;
 
 /// One line for the tail of `chezmoi apply`. Silence when there is nothing to
 /// decide — an apply that prints a reminder every time stops being read.
@@ -45,6 +48,10 @@ pub fn status_line(
     if !expiring.is_empty() {
         let _ = write!(line, " · {} quarantine expiring", expiring.len());
     }
+    let unused = pending.iter().filter(|p| p.never_used(SETTLED)).count();
+    if unused > 0 {
+        let _ = write!(line, " · {unused} never used");
+    }
     let _ = write!(line, "\n  run `pkginbox` to triage");
     Some(line)
 }
@@ -73,6 +80,7 @@ mod tests {
             note: None,
             first_seen: 0,
             expires_at: None,
+            last_used: None,
         }
     }
 

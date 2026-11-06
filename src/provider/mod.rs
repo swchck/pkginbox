@@ -20,6 +20,11 @@ pub struct Installed {
     /// Other spellings the manifest may legitimately use for this package:
     /// short vs tap-qualified names, brew aliases, renamed formulae.
     pub aliases: Vec<String>,
+    /// Commands this package puts on PATH. The package name is often not one
+    /// of them — ripgrep installs `rg`, rm-improved installs `rip`.
+    pub binaries: Vec<String>,
+    /// The application bundle this package installs, if any.
+    pub app: Option<String>,
 }
 
 impl Installed {
@@ -29,7 +34,26 @@ impl Installed {
             label: None,
             version: None,
             aliases: Vec::new(),
+            binaries: Vec::new(),
+            app: None,
         }
+    }
+
+    pub fn with_binary(mut self, binary: impl Into<String>) -> Self {
+        self.binaries.push(binary.into());
+        self
+    }
+
+    pub fn with_app(mut self, app: impl Into<String>) -> Self {
+        self.app = Some(app.into());
+        self
+    }
+
+    /// Whether anything can be said about this package being used. A tap, a
+    /// font or an editor extension runs nothing and opens nothing, so silence
+    /// about it is the honest answer.
+    pub fn has_usage_signal(&self) -> bool {
+        self.app.is_some() || !self.binaries.is_empty()
     }
 
     /// Every name this package answers to, most canonical first.

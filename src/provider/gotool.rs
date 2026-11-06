@@ -50,11 +50,13 @@ fn parse(raw: &str) -> Vec<Installed> {
         if let (Some(p), Some(v)) = (path.take(), version.take())
             && !is_local_build(v)
         {
+            let binary = p.rsplit('/').next().unwrap_or(p);
             out.push(
                 Installed::new(format!("{p}@latest"))
                     .with_version(v)
                     .with_alias(p)
-                    .with_alias(format!("{p}@{v}")),
+                    .with_alias(format!("{p}@{v}"))
+                    .with_binary(binary),
             );
         }
     };

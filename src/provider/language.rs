@@ -34,17 +34,44 @@ impl Provider for Cargo {
 /// indented underneath. A crate installed from a local path gets its path in
 /// parentheses — the manifest cannot reproduce that, so it is skipped.
 fn parse_cargo(raw: &str) -> Vec<Installed> {
-    raw.lines()
-        .filter(|line| !line.starts_with(char::is_whitespace))
-        .filter_map(|line| {
-            let line = line.trim_end_matches(':').trim();
-            if line.ends_with(')') {
-                return None;
+    with_indented_binaries(raw, |line| {
+        let line = line.trim_end_matches(':').trim();
+        if line.ends_with(')') {
+            return None;
+        }
+        let (name, version) = line.split_once(' ')?;
+        Some(Installed::new(name).with_version(version.trim_start_matches('v')))
+    })
+}
+
+/// Both `cargo install --list` and `uv tool list` print a package per
+/// unindented line and its executables indented underneath. Those executables
+/// are what shell history actually holds.
+fn with_indented_binaries(
+    raw: &str,
+    parse_head: impl Fn(&str) -> Option<Installed>,
+) -> Vec<Installed> {
+    let mut out: Vec<Installed> = Vec::new();
+    let mut current: Option<Installed> = None;
+
+    for line in raw.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if line.starts_with(char::is_whitespace) {
+            if let Some(item) = current.as_mut() {
+                let binary = line.trim().trim_start_matches("- ").trim();
+                if !binary.is_empty() {
+                    item.binaries.push(binary.to_string());
+                }
             }
-            let (name, version) = line.split_once(' ')?;
-            Some(Installed::new(name).with_version(version.trim_start_matches('v')))
-        })
-        .collect()
+            continue;
+        }
+        out.extend(current.take());
+        current = parse_head(line);
+    }
+    out.extend(current);
+    out
 }
 
 #[derive(Deserialize)]
@@ -76,7 +103,9 @@ impl Provider for Npm {
             // npm and corepack ship with node itself
             .filter(|(name, _)| !matches!(name.as_str(), "npm" | "corepack"))
             .map(|(name, dep)| {
-                let mut item = Installed::new(name);
+                // a scoped package's binary is usually its unscoped name
+                let binary = name.rsplit('/').next().unwrap_or(&name).to_string();
+                let mut item = Installed::new(name).with_binary(binary);
                 item.version = dep.version;
                 item
             })
@@ -109,21 +138,18 @@ impl Provider for Uv {
 /// `uv tool list` prints `name v1.2.3` per tool, with its entry points indented
 /// as `- binary` underneath.
 fn parse_uv(raw: &str) -> Vec<Installed> {
-    raw.lines()
-        .filter(|line| !line.starts_with(char::is_whitespace) && !line.starts_with('-'))
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() {
-                return None;
+    with_indented_binaries(raw, |line| {
+        if line.starts_with('-') {
+            return None;
+        }
+        let line = line.trim();
+        match line.split_once(' ') {
+            Some((name, version)) => {
+                Some(Installed::new(name).with_version(version.trim_start_matches('v')))
             }
-            match line.split_once(' ') {
-                Some((name, version)) => {
-                    Some(Installed::new(name).with_version(version.trim_start_matches('v')))
-                }
-                None => Some(Installed::new(line)),
-            }
-        })
-        .collect()
+            None => Some(Installed::new(line)),
+        }
+    })
 }
 
 #[cfg(test)]
@@ -152,5 +178,16 @@ mod tests {
         let got = parse_uv("ruff v0.17.3\n- ruff\nposting v2.0.0\n- posting\n");
         assert_eq!(got.len(), 2);
         assert_eq!(got[1].key, "posting");
+    }
+
+    #[test]
+    fn keeps_the_executables_a_crate_installs() {
+        let got = parse_cargo(
+            "cargo-update v20.0.0:\n    cargo-install-update\n    cargo-install-update-config\n",
+        );
+        assert_eq!(
+            got[0].binaries,
+            vec!["cargo-install-update", "cargo-install-update-config"]
+        );
     }
 }
