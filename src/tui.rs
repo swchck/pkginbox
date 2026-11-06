@@ -7,10 +7,7 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, Ke
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
-    Wrap,
-};
+use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::adopt::{self, Profile};
@@ -760,7 +757,23 @@ impl<'a> App<'a> {
                 Style::default().fg(theme::YELLOW),
             ));
         }
-        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+        let line = Line::from(spans);
+        let used = line.width();
+        frame.render_widget(Paragraph::new(line), area);
+
+        if let Some(message) = &self.message {
+            let room = (area.width as usize).saturating_sub(used + 2);
+            if room >= 10 {
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        format!("{} ", clip(message, room)),
+                        Style::default().fg(theme::GREEN),
+                    )))
+                    .alignment(Alignment::Right),
+                    area,
+                );
+            }
+        }
     }
 
     fn draw_sources(&self, frame: &mut Frame, area: Rect) {
@@ -815,36 +828,11 @@ impl<'a> App<'a> {
             area,
             &mut self.state,
         );
-
-        // a bare list of seventy gives no sense of where you are in it
-        if self.items.len() > area.height.saturating_sub(2) as usize {
-            let mut scroll =
-                ScrollbarState::new(self.items.len()).position(self.state.selected().unwrap_or(0));
-            frame.render_stateful_widget(
-                Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                    .begin_symbol(None)
-                    .end_symbol(None)
-                    .thumb_style(Style::default().fg(theme::MUTED)),
-                area.inner(ratatui::layout::Margin {
-                    vertical: 1,
-                    horizontal: 0,
-                }),
-                &mut scroll,
-            );
-        }
     }
 
+    /// Keys only. The message goes in the header instead: a message that took
+    /// this row over left no way to see them but the help modal.
     fn draw_footer(&self, frame: &mut Frame, area: Rect) {
-        if let Some(message) = &self.message {
-            frame.render_widget(
-                Paragraph::new(Line::from(Span::styled(
-                    format!(" {message}"),
-                    Style::default().fg(theme::GREEN),
-                ))),
-                area,
-            );
-            return;
-        }
         let keys = [
             ("a", "adopt"),
             ("q", "hold"),
@@ -853,7 +841,7 @@ impl<'a> App<'a> {
             ("i", "reinstall"),
             ("e", "note"),
             ("/", "filter"),
-            ("⇥", "source"),
+            ("\u{21e5}", "source"),
             ("?", "keys"),
         ];
         let mut spans = vec![Span::raw(" ")];
@@ -1091,6 +1079,16 @@ fn fit(text: &str, width: usize) -> String {
     format!("…{}", text.chars().skip(len - keep).collect::<String>())
 }
 
+/// Cuts a string to fit, keeping the start. The mirror of `fit`, for prose:
+/// a message says what happened in its first words.
+fn clip(text: &str, width: usize) -> String {
+    if text.chars().count() <= width {
+        return text.to_string();
+    }
+    let keep = width.saturating_sub(1);
+    format!("{}…", text.chars().take(keep).collect::<String>())
+}
+
 fn status_label(pkg: &Package) -> String {
     match pkg.status {
         Status::Quarantined => format!("held {}", age(pkg.first_seen)),
@@ -1211,6 +1209,16 @@ mod tests {
         assert!(screen.contains("google-chrome"), "{screen}");
         assert!(screen.contains("2 undecided"), "{screen}");
         assert!(screen.contains("1 missing"), "{screen}");
+    }
+
+    #[test]
+    fn a_message_never_hides_the_keys() {
+        let f = fixture();
+        let mut app = app(&f);
+        app.message = Some("12 undecided, 3 held".into());
+        let screen = render(&mut app);
+        assert!(screen.contains("adopt"), "{screen}");
+        assert!(screen.contains("12 undecided, 3 held"), "{screen}");
     }
 
     #[test]
@@ -1435,6 +1443,7 @@ mod tests {
         };
         let mut app = app(&f);
         app.state.select(Some(1));
+        app.message = Some("ruff held for 30d".into());
 
         let mut terminal = Terminal::new(TestBackend::new(118, 22)).unwrap();
         terminal.draw(|frame| app.draw(frame)).unwrap();
