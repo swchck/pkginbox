@@ -211,6 +211,34 @@ pub fn insert_into_table(
     Ok(finish(out, source))
 }
 
+/// Appends a block to an array of tables, after the last one already there.
+pub fn append_array_table(source: &str, table: &str, fields: &[(&str, &str)]) -> Result<String> {
+    let lines: Vec<&str> = source.lines().collect();
+    let header = format!("[[{table}]]");
+
+    let Some(last) = lines.iter().rposition(|l| l.trim() == header) else {
+        bail!("no `{header}` block to append to");
+    };
+    let mut end = last + 1;
+    while end < lines.len() && !lines[end].trim_start().starts_with('[') {
+        end += 1;
+    }
+    while end > last + 1 && lines[end - 1].trim().is_empty() {
+        end -= 1;
+    }
+
+    let mut block = vec![String::new(), header];
+    block.extend(
+        fields
+            .iter()
+            .map(|(name, value)| format!("{name} = \"{value}\"")),
+    );
+
+    let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+    out.splice(end..end, block);
+    Ok(finish(out, source))
+}
+
 fn comment_column_of_table(lines: &[&str]) -> Option<usize> {
     let cols: Vec<&str> = lines
         .iter()
@@ -364,6 +392,35 @@ TestFlight = 899247664        # Beta app distribution
     fn lists_group_headings() {
         let got = groups(SAMPLE, "packages.darwin.common", "cli").unwrap();
         assert_eq!(got, vec!["Git", "Infrastructure"]);
+    }
+
+    const TABLES: &str = r#"[claude.plugins]
+
+[[claude.plugins.install]]
+name = "gopls-lsp"
+marketplace = "claude-plugins-official"
+
+[[claude.plugins.install]]
+name = "figma"
+marketplace = "claude-plugins-official"
+"#;
+
+    #[test]
+    fn appends_a_block_after_the_last_one() {
+        let out = append_array_table(
+            TABLES,
+            "claude.plugins.install",
+            &[
+                ("name", "code-review"),
+                ("marketplace", "claude-plugins-official"),
+            ],
+        )
+        .unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[lines.len() - 3], "[[claude.plugins.install]]");
+        assert_eq!(lines[lines.len() - 2], "name = \"code-review\"");
+        assert!(lines[lines.len() - 4].is_empty());
+        assert!(out.starts_with(TABLES.split("\n\n[[").next().unwrap()));
     }
 
     #[test]

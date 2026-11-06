@@ -267,7 +267,7 @@ impl<'a> App<'a> {
             .map(|k| (*k).to_string())
             .collect();
         let default_key = adopt::default_key(&pkg.provider, &pkg.key);
-        let comment = homebrew::describe(&pkg.key, pkg.provider == "cask").unwrap_or_default();
+        let comment = homebrew::describe(&pkg.provider, &pkg.key).unwrap_or_default();
 
         let mut form = Form {
             step: Step::Profile,
@@ -365,11 +365,11 @@ impl<'a> App<'a> {
             profile,
             &form.keys[form.key],
         );
-        let Some(key) = &plan.key else {
+        let crate::adopt::Insert::Array { table, key } = &plan.insert else {
             return Ok(Vec::new());
         };
         let source = std::fs::read_to_string(&plan.file)?;
-        Ok(manifest::groups(&source, &plan.table, key).unwrap_or_default())
+        Ok(manifest::groups(&source, table, key).unwrap_or_default())
     }
 
     fn commit_form(&mut self) -> Result<()> {

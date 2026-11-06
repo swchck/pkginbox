@@ -1,5 +1,10 @@
+pub mod apps;
+pub mod editor;
+pub mod gotool;
 pub mod homebrew;
+pub mod language;
 pub mod mas;
+pub mod models;
 
 use anyhow::Result;
 
@@ -37,6 +42,11 @@ impl Installed {
         self
     }
 
+    pub fn with_alias(mut self, alias: impl Into<String>) -> Self {
+        self.aliases.push(alias.into());
+        self
+    }
+
     pub fn with_version(mut self, version: impl Into<String>) -> Self {
         self.version = Some(version.into());
         self
@@ -69,5 +79,13 @@ pub fn all() -> Vec<Box<dyn Provider>> {
         Box::new(homebrew::Cask),
         Box::new(homebrew::Tap),
         Box::new(mas::Mas),
+        Box::new(gotool::Go),
+        Box::new(language::Cargo),
+        Box::new(language::Npm),
+        Box::new(language::Uv),
+        Box::new(editor::VsCode),
+        Box::new(editor::ClaudePlugins),
+        Box::new(models::Ollama),
+        Box::new(apps::Apps),
     ]
 }

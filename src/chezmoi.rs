@@ -67,12 +67,65 @@ impl ChezmoiData {
     /// Concatenates `packages.<os>.common.<key>` with the profile-specific list,
     /// mirroring how the install scripts build their package lists.
     pub fn package_list(&self, key: &str) -> Vec<String> {
+        self.package_path_list(&[key])
+    }
+
+    /// Merge for a manifest that lives outside `packages.<os>` and splits by
+    /// profile itself, such as `[packages.go]` or `[packages.cargo]`.
+    pub fn profile_list(&self, base: &[&str]) -> Vec<String> {
+        let mut out = Vec::new();
+        for profile in ["common", self.machine_type()] {
+            let mut path = base.to_vec();
+            path.push(profile);
+            out.extend(self.strings_at(&path));
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    /// A plain array of strings, for manifests with no profile split at all.
+    pub fn list(&self, path: &[&str]) -> Vec<String> {
+        self.strings_at(path)
+    }
+
+    /// One field of every object in an array of tables.
+    pub fn field_of_each(&self, path: &[&str], fields: &[&str]) -> Vec<String> {
+        let Some(Value::Array(items)) = self.at(path) else {
+            return Vec::new();
+        };
+        items
+            .iter()
+            .filter_map(|item| {
+                let parts: Vec<&str> = fields
+                    .iter()
+                    .filter_map(|f| item.get(f).and_then(Value::as_str))
+                    .collect();
+                (parts.len() == fields.len()).then(|| parts.join("@"))
+            })
+            .collect()
+    }
+
+    fn strings_at(&self, path: &[&str]) -> Vec<String> {
+        match self.at(path) {
+            Some(Value::Array(items)) => items
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The same common + profile merge as `package_list`, for a nested path
+    /// under `packages.<os>.<profile>`.
+    pub fn package_path_list(&self, suffix: &[&str]) -> Vec<String> {
         let os = self.os();
         let mut out = Vec::new();
         for profile in ["common", self.machine_type()] {
-            if let Some(Value::Array(items)) = self.at(&["packages", os, profile, key]) {
-                out.extend(items.iter().filter_map(Value::as_str).map(str::to_owned));
-            }
+            let mut path = vec!["packages", os, profile];
+            path.extend_from_slice(suffix);
+            out.extend(self.strings_at(&path));
         }
         out.sort();
         out.dedup();

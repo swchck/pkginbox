@@ -44,6 +44,22 @@ struct BrewCask {
     old_tokens: Vec<String>,
     #[serde(default)]
     installed: Option<String>,
+    #[serde(default)]
+    artifacts: Vec<serde_json::Value>,
+}
+
+/// The `.app` bundles installed casks own, so a scan of /Applications can tell
+/// a hand-dragged app from one brew put there.
+pub fn cask_app_names() -> Result<Vec<String>> {
+    Ok(info()?
+        .casks
+        .iter()
+        .flat_map(|c| &c.artifacts)
+        .filter_map(|artifact| artifact.get("app")?.as_array())
+        .flatten()
+        .filter_map(|app| app.as_str())
+        .map(str::to_owned)
+        .collect())
 }
 
 /// One `brew info` call feeds both the formula and the cask provider; it is the
@@ -72,10 +88,17 @@ fn formula_item(f: &BrewFormula) -> Installed {
     item
 }
 
-/// A one-line description for the manifest comment. Missing is fine — a tap or
-/// a cask brew cannot resolve offline simply gets no comment.
-pub fn describe(name: &str, cask: bool) -> Option<String> {
-    let kind = if cask { "--cask" } else { "--formula" };
+/// A one-line description for the manifest comment, for packages brew knows
+/// about. Missing is fine — a tap, or a cask brew cannot resolve offline,
+/// simply gets no comment.
+pub fn describe(provider: &str, name: &str) -> Option<String> {
+    let kind = match provider {
+        "brew" => "--formula",
+        "cask" => "--cask",
+        // asking brew about a crate or an npm package invites a coincidental
+        // match on an unrelated formula of the same name
+        _ => return None,
+    };
     let raw = capture("brew", &["desc", kind, name]).ok()?;
     let line = raw.lines().next()?.trim();
     let text = line

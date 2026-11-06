@@ -173,7 +173,7 @@ fn main() -> Result<()> {
             let list = list.unwrap_or_else(|| adopt::default_key(&provider, &key).to_string());
             let comment = match comment {
                 Some(text) => Some(text),
-                None => provider::homebrew::describe(&key, provider == "cask"),
+                None => provider::homebrew::describe(&provider, &key),
             };
             let plan = adopt::plan(&ChezmoiData::source_dir()?, &data, &pkg, profile, &list);
             let changes = adopt::render(

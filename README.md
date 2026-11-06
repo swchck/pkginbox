@@ -35,6 +35,29 @@ pkginbox brewfile     emit the quarantine Brewfile that protects packages from c
 In the TUI: `a` adopt, `q` hold, `d` leave unmanaged, `x` uninstall, `r` rescan,
 `?` keys, `Esc` quit.
 
+## What it watches
+
+| Provider | Installed state | Declared in |
+|---|---|---|
+| `brew` | `brew info --json=v2 --installed` | `cli`, `languages` |
+| `cask` | the same call's cask list | `casks`, `fonts` |
+| `tap` | `brew tap` | `taps`, plus tap/trust lines in the install script |
+| `mas` | `mas list` | `appstore_apps` |
+| `go` | `go version -m $GOBIN` | `[packages.go]` |
+| `cargo` | `cargo install --list` | `[packages.cargo]` |
+| `npm` | `npm ls -g --depth=0` | `[packages.npm]` |
+| `uv` | `uv tool list` | `[packages.uv]` |
+| `vscode` | `code --list-extensions` | `[vscode] extensions` |
+| `claude` | `claude plugin list` | `[[claude.plugins.install]]` |
+| `ollama` | `ollama list` | `[packages.<os>.personal.ollama] models` |
+| `app` | `/Applications`, minus casks and App Store apps | nothing — these cannot be declared |
+
+A provider whose tool is not installed is skipped rather than reported as empty.
+
+The `app` provider is the one that only ever reports. A bundle dragged out of a
+disk image has no manifest entry that would reproduce it, so the useful outcome
+is recognising it and either finding a cask or leaving it alone deliberately.
+
 ## Adoption
 
 Adopting writes the package into the chezmoi manifest and nothing else — the
