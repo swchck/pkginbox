@@ -2,6 +2,8 @@ mod adopt;
 mod chezmoi;
 mod config;
 mod db;
+mod export;
+mod install;
 mod manifest;
 mod provider;
 mod quarantine;
@@ -92,6 +94,20 @@ enum Command {
         key: String,
         text: Vec<String>,
     },
+    /// Write this machine's snapshot into the dotfiles repository
+    Export {
+        /// Write the file but leave it uncommitted
+        #[arg(long)]
+        no_commit: bool,
+    },
+    /// Take a package back out of the manifest
+    Undeclare {
+        provider: String,
+        key: String,
+        /// Show the lines that would go and write nothing
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Regenerate the quarantine Brewfile
     Brewfile,
 }
@@ -125,6 +141,15 @@ fn apply_record(db: &Db, paths: &Paths, recorded: &record::Recorded, command: &s
     Ok(())
 }
 
+/// Keeps this machine's snapshot current without committing it. Committing on
+/// every scan would put a commit in the dotfiles repository behind the user's
+/// back; `pkginbox export` is the command that does that deliberately.
+fn refresh_snapshot(db: &Db, data: &ChezmoiData) {
+    if let Ok(source_dir) = ChezmoiData::source_dir() {
+        let _ = export::write(db, &source_dir, data.hostname(), data.machine_type());
+    }
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let paths = Paths::discover()?;
@@ -135,6 +160,7 @@ fn main() -> Result<()> {
         let data = ChezmoiData::load()?;
         scan::run(&db, &data)?;
         quarantine::write(&db, &paths.quarantine_brewfile())?;
+        refresh_snapshot(&db, &data);
         return tui::run(&db, &paths, &data, &ChezmoiData::source_dir()?);
     };
 
@@ -143,6 +169,7 @@ fn main() -> Result<()> {
             let data = ChezmoiData::load()?;
             let summary = scan::run(&db, &data)?;
             quarantine::write(&db, &paths.quarantine_brewfile())?;
+            refresh_snapshot(&db, &data);
             if !quiet {
                 println!(
                     "scanned: {} outside the manifest, {} declared but missing, {} new",
@@ -159,6 +186,7 @@ fn main() -> Result<()> {
             let data = ChezmoiData::load()?;
             scan::run(&db, &data)?;
             quarantine::write(&db, &paths.quarantine_brewfile())?;
+            refresh_snapshot(&db, &data);
             let line = report::status_line(
                 &db.by_status(Status::Pending)?,
                 &db.by_status(Status::Drifted)?,
@@ -236,7 +264,7 @@ fn main() -> Result<()> {
                     }
                 }
             } else {
-                let files = adopt::commit(&db, &pkg, &changes)?;
+                let files = adopt::commit(&db, &pkg, &changes, Status::Adopted)?;
                 quarantine::write(&db, &paths.quarantine_brewfile())?;
                 for file in files {
                     println!("wrote {}", file.display());
@@ -261,6 +289,38 @@ fn main() -> Result<()> {
             let note = text.join(" ");
             db.set_note(&provider, &key, Some(note.as_str()))?;
             println!("noted {provider}/{key}");
+        }
+        Command::Export { no_commit } => {
+            let data = ChezmoiData::load()?;
+            let source_dir = ChezmoiData::source_dir()?;
+            let path = export::write(&db, &source_dir, data.hostname(), data.machine_type())?;
+            println!("wrote {}", path.display());
+            if !no_commit && export::commit(&source_dir, &path)? {
+                println!("committed");
+            }
+        }
+        Command::Undeclare {
+            provider,
+            key,
+            dry_run,
+        } => {
+            let data = ChezmoiData::load()?;
+            let pkg = db
+                .find(&provider, &key)?
+                .ok_or_else(|| anyhow::anyhow!("{provider}/{key} is not in the inbox"))?;
+            let changes = adopt::undeclare(&ChezmoiData::source_dir()?, &data, &pkg)?;
+            if dry_run {
+                for change in &changes {
+                    for (number, line) in change.removed() {
+                        println!("{}:{number}", change.path.display());
+                        println!("-{line}");
+                    }
+                }
+            } else {
+                for file in adopt::commit(&db, &pkg, &changes, Status::Removed)? {
+                    println!("wrote {}", file.display());
+                }
+            }
         }
         Command::Brewfile => {
             let n = quarantine::write(&db, &paths.quarantine_brewfile())?;

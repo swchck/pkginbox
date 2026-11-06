@@ -211,6 +211,110 @@ pub fn insert_into_table(
     Ok(finish(out, source))
 }
 
+/// Drops a string entry from a manifest array.
+pub fn remove_from_array(source: &str, table: &str, key: &str, entry: &str) -> Result<String> {
+    let lines: Vec<&str> = source.lines().collect();
+    let array = find_array(&lines, table, key)?;
+    let quoted = format!("\"{entry}\"");
+
+    let at = lines[array.open + 1..array.close]
+        .iter()
+        .position(|l| l.trim_start().starts_with(&quoted))
+        .map(|offset| array.open + 1 + offset);
+    let Some(at) = at else {
+        bail!("`{entry}` is not in `{key}`");
+    };
+
+    let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+    out.remove(at);
+    Ok(finish(trim_empty_group(out, at), source))
+}
+
+/// Drops a `Name = value` line, found by its value — the manifest keys App
+/// Store apps by display name, but everything else matches on the id.
+pub fn remove_from_table_by_value(source: &str, table: &str, value: &str) -> Result<String> {
+    let lines: Vec<&str> = source.lines().collect();
+    let Some(start) = find_table(&lines, table) else {
+        bail!("no `[{table}]` section in this file");
+    };
+
+    let at = lines
+        .iter()
+        .enumerate()
+        .skip(start + 1)
+        .take_while(|(_, l)| !l.trim_start().starts_with('['))
+        .find(|(_, l)| {
+            l.split_once('=')
+                .is_some_and(|(_, rest)| rest.split('#').next().unwrap_or("").trim() == value)
+        })
+        .map(|(idx, _)| idx);
+    let Some(at) = at else {
+        bail!("`{value}` is not in `[{table}]`");
+    };
+
+    let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+    out.remove(at);
+    Ok(finish(out, source))
+}
+
+/// Drops the `[[table]]` block whose fields all match.
+pub fn remove_array_table(source: &str, table: &str, fields: &[(&str, &str)]) -> Result<String> {
+    let lines: Vec<&str> = source.lines().collect();
+    let header = format!("[[{table}]]");
+
+    for (idx, line) in lines.iter().enumerate() {
+        if line.trim() != header {
+            continue;
+        }
+        let mut end = idx + 1;
+        while end < lines.len() && !lines[end].trim_start().starts_with('[') {
+            end += 1;
+        }
+        let block = &lines[idx + 1..end];
+        let matches = fields.iter().all(|(name, value)| {
+            block.iter().any(|l| {
+                let Some((key, rest)) = l.split_once('=') else {
+                    return false;
+                };
+                key.trim() == *name && rest.trim().trim_matches('"') == *value
+            })
+        });
+        if !matches {
+            continue;
+        }
+        // take the blank line that separated this block from the one before it
+        let start = if idx > 0 && lines[idx - 1].trim().is_empty() {
+            idx - 1
+        } else {
+            idx
+        };
+        let mut out: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        out.drain(start..end);
+        return Ok(finish(out, source));
+    }
+    bail!("no matching `{header}` block")
+}
+
+/// Removes a group heading left with nothing under it, and the blank line that
+/// went with it.
+fn trim_empty_group(mut lines: Vec<String>, at: usize) -> Vec<String> {
+    let follows_nothing = lines
+        .get(at)
+        .is_none_or(|l| l.trim().is_empty() || l.trim().starts_with('#') || l.trim() == "]");
+    if !follows_nothing || at == 0 {
+        return lines;
+    }
+    let heading = at - 1;
+    if !lines[heading].trim().starts_with('#') {
+        return lines;
+    }
+    lines.remove(heading);
+    if heading > 0 && lines[heading - 1].trim().is_empty() {
+        lines.remove(heading - 1);
+    }
+    lines
+}
+
 /// Appends a block to an array of tables, after the last one already there.
 pub fn append_array_table(source: &str, table: &str, fields: &[(&str, &str)]) -> Result<String> {
     let lines: Vec<&str> = source.lines().collect();
@@ -386,6 +490,52 @@ TestFlight = 899247664        # Beta app distribution
         let err = insert_into_array(SAMPLE, "packages.darwin.common", "casks", "arc", None, None)
             .unwrap_err();
         assert!(err.to_string().contains("no `casks` array"), "{err}");
+    }
+
+    #[test]
+    fn removes_an_entry_and_leaves_its_neighbours() {
+        let out = remove_from_array(SAMPLE, "packages.darwin.common", "cli", "act").unwrap();
+        assert!(!out.contains("\"act\""));
+        assert!(out.contains("\"gh\",                   # GitHub CLI"));
+        assert!(out.contains("# Git"));
+    }
+
+    #[test]
+    fn removing_the_last_member_takes_its_group_heading_too() {
+        let out = remove_from_array(SAMPLE, "packages.darwin.common", "cli", "kaskade").unwrap();
+        assert!(!out.contains("# Infrastructure"), "{out}");
+        assert!(out.contains("# Git"));
+    }
+
+    #[test]
+    fn reports_an_entry_that_is_not_there() {
+        let err = remove_from_array(SAMPLE, "packages.darwin.common", "cli", "jq").unwrap_err();
+        assert!(err.to_string().contains("is not in"), "{err}");
+    }
+
+    #[test]
+    fn removes_an_app_store_entry_by_its_id() {
+        let out =
+            remove_from_table_by_value(SAMPLE, "packages.darwin.common.appstore_apps", "747648890")
+                .unwrap();
+        assert!(!out.contains("Telegram"));
+        assert!(out.contains("TestFlight"));
+    }
+
+    #[test]
+    fn removes_the_block_whose_fields_match() {
+        let out = remove_array_table(
+            TABLES,
+            "claude.plugins.install",
+            &[
+                ("name", "gopls-lsp"),
+                ("marketplace", "claude-plugins-official"),
+            ],
+        )
+        .unwrap();
+        assert!(!out.contains("gopls-lsp"));
+        assert!(out.contains("figma"));
+        assert_eq!(out.matches("[[claude.plugins.install]]").count(), 1);
     }
 
     #[test]

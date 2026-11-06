@@ -36,6 +36,10 @@ enum Mode {
 #[derive(Clone)]
 enum Pending {
     Uninstall,
+    /// Take a declared package back out of the manifest.
+    Undeclare,
+    /// Put a declared package back on this machine.
+    Reinstall,
 }
 
 struct Form {
@@ -62,6 +66,7 @@ struct App<'a> {
     paths: &'a Paths,
     data: &'a ChezmoiData,
     source_dir: PathBuf,
+    others: Vec<crate::export::Snapshot>,
     items: Vec<Package>,
     state: ListState,
     mode: Mode,
@@ -76,6 +81,7 @@ impl<'a> App<'a> {
             paths,
             data,
             source_dir: source_dir.to_path_buf(),
+            others: crate::export::read_others(source_dir, data.hostname()),
             items: Vec::new(),
             state: ListState::default(),
             mode: Mode::Browse,
@@ -162,6 +168,7 @@ impl<'a> App<'a> {
             KeyCode::Char('d') => self.dismiss_selected()?,
             KeyCode::Char('x') => self.ask_uninstall(),
             KeyCode::Char('e') => self.open_note(),
+            KeyCode::Char('i') => self.ask_reinstall(),
             KeyCode::Char('a') | KeyCode::Enter => self.open_form()?,
             _ => {}
         }
@@ -199,8 +206,12 @@ impl<'a> App<'a> {
 
     fn ask_uninstall(&mut self) {
         let Some(pkg) = self.selected() else { return };
+        // it is already gone from the machine; what is left is the declaration
         if pkg.status == Status::Drifted {
-            self.message = Some("that package is already gone from this machine".into());
+            self.mode = Mode::Confirm {
+                prompt: format!("stop declaring {} in the manifest?", pkg.key),
+                action: Pending::Undeclare,
+            };
             return;
         }
         if pkg.provider == "mas" {
@@ -211,6 +222,61 @@ impl<'a> App<'a> {
             prompt: format!("uninstall {} from this machine?", pkg.key),
             action: Pending::Uninstall,
         };
+    }
+
+    fn ask_reinstall(&mut self) {
+        let Some(pkg) = self.selected() else { return };
+        if pkg.status != Status::Drifted {
+            self.message = Some("that package is already installed".into());
+            return;
+        }
+        let Some(command) = crate::install::describe(&pkg.provider, &pkg.key) else {
+            self.message = Some(format!("nothing can reinstall a `{}` entry", pkg.provider));
+            return;
+        };
+        self.mode = Mode::Confirm {
+            prompt: format!("run `{command}`?"),
+            action: Pending::Reinstall,
+        };
+    }
+
+    fn undeclare_selected(&mut self) -> Result<()> {
+        let Some(pkg) = self.selected().cloned() else {
+            return Ok(());
+        };
+        let outcome = adopt::undeclare(&self.source_dir, self.data, &pkg)
+            .and_then(|changes| adopt::commit(self.db, &pkg, &changes, Status::Removed));
+        match outcome {
+            Ok(files) => {
+                self.reload()?;
+                let names: Vec<String> = files
+                    .iter()
+                    .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                    .collect();
+                self.message = Some(format!("{} dropped from {}", pkg.key, names.join(" + ")));
+            }
+            Err(err) => self.message = Some(first_line(&err.to_string())),
+        }
+        Ok(())
+    }
+
+    fn reinstall_selected(&mut self) -> Result<()> {
+        let Some(pkg) = self.selected().cloned() else {
+            return Ok(());
+        };
+        let Some((bin, args)) = crate::install::command(&pkg.provider, &pkg.key) else {
+            return Ok(());
+        };
+        let args: Vec<&str> = args.iter().map(String::as_str).collect();
+        match capture(bin, &args) {
+            Ok(_) => {
+                self.db.mark_managed(&pkg.provider, &pkg.key)?;
+                self.reload()?;
+                self.message = Some(format!("{} reinstalled", pkg.key));
+            }
+            Err(err) => self.message = Some(first_line(&err.to_string())),
+        }
+        Ok(())
     }
 
     fn open_note(&mut self) {
@@ -254,6 +320,8 @@ impl<'a> App<'a> {
                 self.mode = Mode::Browse;
                 match action {
                     Pending::Uninstall => self.uninstall_selected()?,
+                    Pending::Undeclare => self.undeclare_selected()?,
+                    Pending::Reinstall => self.reinstall_selected()?,
                 }
             }
             KeyCode::Char('n') | KeyCode::Esc => self.mode = Mode::Browse,
@@ -430,7 +498,7 @@ impl<'a> App<'a> {
             Some(comment.as_str()).filter(|c| !c.is_empty()),
             group.as_deref(),
         )
-        .and_then(|changes| adopt::commit(self.db, &pkg, &changes));
+        .and_then(|changes| adopt::commit(self.db, &pkg, &changes, Status::Adopted));
         match outcome {
             Ok(files) => {
                 quarantine::write(self.db, &self.paths.quarantine_brewfile())?;
@@ -503,7 +571,7 @@ impl<'a> App<'a> {
                 Style::default().fg(Color::Yellow),
             )),
             None => Line::from(Span::styled(
-                "a adopt · q hold · d leave · x uninstall · e note · r rescan · ? help · Esc quit",
+                "a adopt · q hold · d leave · x remove · i reinstall · e note · r rescan · ? quit Esc",
                 Style::default().fg(Color::DarkGray),
             )),
         };
@@ -537,7 +605,7 @@ impl<'a> App<'a> {
                 ]),
                 5,
             ),
-            Mode::Help => draw_modal(frame, " keys ", Paragraph::new(help_text()), 13),
+            Mode::Help => draw_modal(frame, " keys ", Paragraph::new(help_text()), 14),
             Mode::Browse => {}
         }
     }
@@ -596,11 +664,25 @@ impl<'a> App<'a> {
                 Span::raw(format!("another {}", age(now() * 2 - at))),
             ]));
         }
+        let elsewhere = crate::export::elsewhere(&self.others, &pkg.provider, &pkg.key);
+        if !elsewhere.is_empty() {
+            lines.push(Line::from(vec![
+                Span::styled("also on ", Style::default().fg(Color::DarkGray)),
+                Span::raw(
+                    elsewhere
+                        .iter()
+                        .map(|(host, status)| format!("{host} ({status})"))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+            ]));
+        }
         if pkg.status == Status::Drifted {
             lines.push(Line::from(""));
             lines.push(Line::from(
                 "declared in the manifest but not installed — the next apply puts it back",
             ));
+            lines.push(Line::from("i reinstalls it here · x stops declaring it"));
         }
         Paragraph::new(lines).block(block).wrap(Wrap { trim: true })
     }
@@ -662,7 +744,8 @@ fn help_text() -> Vec<Line<'static>> {
         "a / Enter  adopt into the chezmoi manifest",
         "q          hold: survive brew cleanup for 30 days",
         "d          leave unmanaged, stop asking",
-        "x          uninstall from this machine",
+        "x          uninstall here, or stop declaring a missing one",
+        "i          reinstall a declared package that went missing",
         "e          write a note on why it is here",
         "r          rescan",
         "Esc        quit",

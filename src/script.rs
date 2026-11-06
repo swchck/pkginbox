@@ -50,6 +50,29 @@ pub fn add_tap(source: &str, profile: &str, tap: &str) -> Result<String> {
     Ok(joined)
 }
 
+/// Drops the `brew tap` and `brew trust --tap` lines for a tap that is no
+/// longer declared.
+pub fn remove_tap(source: &str, tap: &str) -> Result<String> {
+    let kept: Vec<&str> = source.lines().filter(|l| !names_tap(l, tap)).collect();
+    if kept.len() == source.lines().count() {
+        bail!("`{tap}` is not tapped in the install script");
+    }
+    let mut out = kept.join("\n");
+    if source.ends_with('\n') {
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+fn names_tap(line: &str, tap: &str) -> bool {
+    let tokens: Vec<&str> = line.split_whitespace().collect();
+    match tokens.as_slice() {
+        ["brew", "tap", name, ..] => *name == tap,
+        ["brew", "trust", "--tap", name, ..] => *name == tap,
+        _ => false,
+    }
+}
+
 fn render(command: &str, column: Option<usize>) -> String {
     let target = column.unwrap_or(command.len() + MIN_GAP);
     let pad = target.saturating_sub(command.len()).max(MIN_GAP);
@@ -200,6 +223,20 @@ brew trust --tap derailed/k9s            >/dev/null 2>&1 || true
             .find(|l| l.starts_with("brew trust --tap gabrie30"))
             .unwrap();
         assert_eq!(new.find(SUFFIX), reference.find(SUFFIX));
+    }
+
+    #[test]
+    fn removes_both_lines_of_a_tap() {
+        let out = remove_tap(SAMPLE, "derailed/k9s").unwrap();
+        assert!(!out.contains("derailed/k9s"));
+        assert!(out.contains("gabrie30/utils"));
+        assert!(out.contains("{{ if eq .machine_type \"work\" -}}"));
+    }
+
+    #[test]
+    fn reports_a_tap_that_is_not_in_the_script() {
+        let err = remove_tap(SAMPLE, "nobody/nothing").unwrap_err();
+        assert!(err.to_string().contains("is not tapped"), "{err}");
     }
 
     #[test]

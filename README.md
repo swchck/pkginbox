@@ -103,6 +103,41 @@ manifest is checked first, so there is no entry for the next scan to close.
 `pkginbox note <provider> <key> <text>`, or `e` in the TUI, attaches the reason
 a package is there — the one thing neither mechanism can work out on its own.
 
+## When something declared goes missing
+
+The other direction of drift: the manifest declares a package, the machine no
+longer has it, and the next apply will quietly put it back. Two answers, both
+on the entry itself — `i` reinstalls it here, `x` stops declaring it.
+
+Dropping a declaration is the mirror of adopting one, and for a tap it is three
+lines in two files: the manifest entry, the `brew tap` line and the
+`brew trust --tap` line. Removing the last member of a group takes the group's
+heading with it, so the manifest does not fill up with empty sections.
+
+Which profile declared the package is not recorded anywhere, so every candidate
+file is tried until one of them holds the entry.
+
+## Across machines
+
+The database is local, but a snapshot of it is written next to the manifest:
+
+```
+inbox/<hostname>.json
+```
+
+One writer per file, so two machines never produce a merge conflict, and the
+machine is identified by the file name itself. Each entry shows what the other
+machines decided about the same package — useful when the laptop adopted
+something the desktop is still undecided about.
+
+Scans refresh the snapshot but never commit it; committing behind your back in
+your own dotfiles repository is not something a status line should do.
+`pkginbox export` is the command that commits it deliberately.
+
+Note that the snapshot lists what is installed on the machine, hand-installed
+applications included. In a public dotfiles repository that is a longer list
+than the manifest itself.
+
 ## State
 
 The database lives at `${XDG_STATE_HOME:-~/.local/state}/pkginbox/inbox.db` and is local

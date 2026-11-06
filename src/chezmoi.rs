@@ -52,6 +52,13 @@ impl ChezmoiData {
             .unwrap_or("personal")
     }
 
+    pub fn hostname(&self) -> &str {
+        self.root
+            .get("hostname")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+    }
+
     pub fn os(&self) -> &str {
         self.root
             .get("chezmoi")

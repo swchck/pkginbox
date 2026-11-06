@@ -196,6 +196,21 @@ pub struct Change {
 }
 
 impl Change {
+    /// The lines this change takes away, with their old line numbers.
+    pub fn removed(&self) -> Vec<(usize, &str)> {
+        let after: Vec<&str> = self.after.lines().collect();
+        let mut new = 0;
+        let mut out = Vec::new();
+        for (idx, line) in self.before.lines().enumerate() {
+            if new < after.len() && after[new] == line {
+                new += 1;
+            } else {
+                out.push((idx + 1, line));
+            }
+        }
+        out
+    }
+
     /// The lines this change adds, with their new line numbers.
     ///
     /// Matching is positional rather than by content: the same `brew tap …`
@@ -264,11 +279,71 @@ pub fn render(
     Ok(changes)
 }
 
+/// Works out the edits that take a package back out of the manifest.
+pub fn render_removal(pkg: &Package, plan: &Plan) -> Result<Vec<Change>> {
+    let before = fs::read_to_string(&plan.file)?;
+    let after = match &plan.insert {
+        Insert::Unsupported(why) => bail!("{why}"),
+        Insert::Array { table, key } => manifest::remove_from_array(&before, table, key, &pkg.key)?,
+        Insert::Table { table } => manifest::remove_from_table_by_value(&before, table, &pkg.key)?,
+        Insert::ArrayTable { table, fields } => {
+            let fields: Vec<(&str, &str)> = fields
+                .iter()
+                .map(|(name, value)| (name.as_str(), value.as_str()))
+                .collect();
+            manifest::remove_array_table(&before, table, &fields)?
+        }
+    };
+
+    let mut changes = vec![Change {
+        path: plan.file.clone(),
+        before,
+        after,
+    }];
+
+    if let Some(script_path) = &plan.script {
+        let before = fs::read_to_string(script_path)?;
+        let after = script::remove_tap(&before, &pkg.key)?;
+        changes.push(Change {
+            path: script_path.clone(),
+            before,
+            after,
+        });
+    }
+
+    Ok(changes)
+}
+
+/// Finds where a package is actually declared and renders its removal.
+///
+/// The record only says the package drifted, not which profile's file put it
+/// there, so every candidate is tried until one of them holds the entry.
+pub fn undeclare(source_dir: &Path, data: &ChezmoiData, pkg: &Package) -> Result<Vec<Change>> {
+    let keys = keys_for(&pkg.provider);
+    let keys: Vec<&str> = if keys.is_empty() {
+        vec![""]
+    } else {
+        keys.to_vec()
+    };
+
+    let mut last = None;
+    for profile in [Profile::Common, Profile::Personal, Profile::Work] {
+        for key in &keys {
+            let plan = plan(source_dir, data, pkg, profile, key);
+            match render_removal(pkg, &plan) {
+                Ok(changes) => return Ok(changes),
+                Err(err) => last = Some(err),
+            }
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow::anyhow!("could not find where {} is declared", pkg.key)))
+}
+
 /// Writes the rendered edits and closes the package's inbox record.
 ///
 /// Every file is restored if the manifest stops parsing afterwards: a
 /// half-applied edit here breaks every later `chezmoi apply`, not just this one.
-pub fn commit(db: &Db, pkg: &Package, changes: &[Change]) -> Result<Vec<PathBuf>> {
+pub fn commit(db: &Db, pkg: &Package, changes: &[Change], status: Status) -> Result<Vec<PathBuf>> {
     for change in changes {
         fs::write(&change.path, &change.after)?;
     }
@@ -280,7 +355,7 @@ pub fn commit(db: &Db, pkg: &Package, changes: &[Change]) -> Result<Vec<PathBuf>
         return Err(err.context("the manifest stopped parsing; the edit was rolled back"));
     }
 
-    db.set_status(&pkg.provider, &pkg.key, Status::Adopted)?;
+    db.set_status(&pkg.provider, &pkg.key, status)?;
     Ok(changes.iter().map(|c| c.path.clone()).collect())
 }
 
