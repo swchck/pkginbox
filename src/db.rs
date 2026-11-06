@@ -96,6 +96,17 @@ impl Db {
         Ok(db)
     }
 
+    /// Pretends every undecided record has been sitting there a while, so the
+    /// "never used" hint has something to fire on.
+    #[cfg(test)]
+    pub fn backdate(&self, seconds: i64) -> Result<()> {
+        self.conn.execute(
+            "UPDATE packages SET first_seen = ?1 WHERE status != 'drifted'",
+            params![now() - seconds],
+        )?;
+        Ok(())
+    }
+
     #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
         let db = Self {

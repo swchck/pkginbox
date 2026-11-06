@@ -36,6 +36,10 @@ In the TUI: `a` adopt, `q` hold, `d` leave unmanaged, `x` uninstall (or stop
 declaring a missing package), `i` reinstall, `e` note, `/` filter by name, `Tab`
 to walk the sources, `r` rescan, `?` keys, `Esc` quit.
 
+It is drawn in One Dark, taken from the colours the shell is already themed
+with, with Nerd Font marks for the sources. A terminal without those fonts shows
+a box where the mark is, not a broken layout.
+
 The interface opens on what the database already knows and refreshes itself when
 the background scan lands. A scan shells out to a dozen package managers, so
 waiting for it before the first frame made every start feel broken.

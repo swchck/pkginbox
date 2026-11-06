@@ -4,10 +4,13 @@ use std::time::Duration;
 
 use anyhow::Result;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{
+    Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Wrap,
+};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::adopt::{self, Profile};
@@ -16,7 +19,7 @@ use crate::config::Paths;
 use crate::db::{Db, Package, Status};
 use crate::provider::homebrew;
 use crate::util::{age, capture, now};
-use crate::{manifest, quarantine};
+use crate::{manifest, quarantine, theme};
 
 const QUARANTINE_DAYS: i64 = 30;
 
@@ -676,134 +679,197 @@ impl<'a> App<'a> {
             ])
             .split(frame.area());
 
-        let counts = self.counts();
-        let mut header = vec![
-            Span::styled("pkginbox", Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw(format!(
-                "  {} undecided · {} held · {} declared but missing",
-                counts.0, counts.1, counts.2
-            )),
-        ];
-        if self.scan.is_some() {
-            header.push(Span::styled(
-                "  · scanning…",
-                Style::default().fg(Color::Cyan),
-            ));
-        }
-        if !self.filter.is_empty() {
-            header.push(Span::styled(
-                format!("  · /{}", self.filter),
-                Style::default().fg(Color::Yellow),
-            ));
-        }
-        frame.render_widget(Paragraph::new(Line::from(header)), chunks[0]);
+        self.draw_header(frame, chunks[0]);
 
         let body = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Length(14),
+                Constraint::Length(16),
                 Constraint::Min(30),
-                Constraint::Length(38),
+                Constraint::Length(40),
             ])
             .split(chunks[1]);
 
-        let sources: Vec<ListItem> = self
-            .sources
-            .iter()
-            .enumerate()
-            .map(|(idx, (id, count))| {
-                let style = if idx == self.source {
-                    Style::default().add_modifier(Modifier::REVERSED)
-                } else {
-                    Style::default()
-                };
-                ListItem::new(Line::from(Span::styled(
-                    format!("{id:<7}{count:>4} "),
-                    style,
-                )))
-            })
-            .collect();
-        frame.render_widget(
-            List::new(sources).block(Block::default().borders(Borders::ALL).title(" sources ")),
-            body[0],
-        );
-
-        let items: Vec<ListItem> = self
-            .items
-            .iter()
-            .map(|p| ListItem::new(package_row(p, body[1].width.saturating_sub(2) as usize)))
-            .collect();
-        frame.render_stateful_widget(
-            List::new(items)
-                .block(Block::default().borders(Borders::ALL).title(" packages "))
-                .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
-            body[1],
-            &mut self.state,
-        );
-
+        self.draw_sources(frame, body[0]);
+        self.draw_packages(frame, body[1]);
         frame.render_widget(self.details(), body[2]);
-
-        let hint = match &self.message {
-            Some(msg) => Line::from(Span::styled(
-                msg.clone(),
-                Style::default().fg(Color::Yellow),
-            )),
-            None => Line::from(Span::styled(
-                "a adopt · q hold · d leave · x remove · i reinstall · e note · / filter · Tab source · ? keys",
-                Style::default().fg(Color::DarkGray),
-            )),
-        };
-        frame.render_widget(Paragraph::new(hint), chunks[2]);
+        self.draw_footer(frame, chunks[2]);
 
         match &self.mode {
             Mode::Adopt(form) => self.draw_form(frame, form),
             Mode::Confirm { prompt, .. } => draw_modal(
                 frame,
-                " confirm ",
+                "confirm",
                 Paragraph::new(vec![
-                    Line::from(prompt.clone()),
+                    Line::from(Span::styled(prompt.clone(), theme::body())),
                     Line::from(""),
-                    Line::from(Span::styled(
-                        "y to go ahead · n to cancel",
-                        Style::default().fg(Color::DarkGray),
-                    )),
-                ]),
-                5,
-            ),
-            Mode::Note { text } => draw_modal(
-                frame,
-                " note ",
-                Paragraph::new(vec![
-                    Line::from(format!("{text}_")),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "Enter to save · Esc to cancel",
-                        Style::default().fg(Color::DarkGray),
-                    )),
+                    Line::from(vec![
+                        Span::styled("y", Style::default().fg(theme::GREEN)),
+                        Span::styled(" go ahead   ", theme::dim()),
+                        Span::styled("n", Style::default().fg(theme::RED)),
+                        Span::styled(" cancel", theme::dim()),
+                    ]),
                 ]),
                 5,
             ),
             Mode::Filter { text } => draw_modal(
                 frame,
-                " filter ",
-                Paragraph::new(vec![
-                    Line::from(format!("{text}_")),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "Enter to keep it · Esc to go back",
-                        Style::default().fg(Color::DarkGray),
-                    )),
-                ]),
+                "filter",
+                Paragraph::new(prompt_lines(text, "Enter to keep it · Esc to go back")),
                 5,
             ),
-            Mode::Help => draw_modal(frame, " keys ", Paragraph::new(help_text()), 16),
+            Mode::Note { text } => draw_modal(
+                frame,
+                "note",
+                Paragraph::new(prompt_lines(text, "Enter to save · Esc to cancel")),
+                5,
+            ),
+            Mode::Help => draw_modal(frame, "keys", Paragraph::new(help_text()), 17),
             Mode::Browse => {}
         }
     }
 
+    fn draw_header(&self, frame: &mut Frame, area: Rect) {
+        let (pending, held, missing) = self.counts();
+        let mut spans = vec![
+            Span::styled(
+                " pkginbox ",
+                Style::default()
+                    .fg(theme::BLUE)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("{pending} undecided"), theme::body()),
+            Span::styled(" · ", theme::label()),
+            Span::styled(format!("{held} held"), Style::default().fg(theme::CYAN)),
+            Span::styled(" · ", theme::label()),
+            Span::styled(
+                format!("{missing} missing"),
+                Style::default().fg(theme::RED),
+            ),
+        ];
+        if self.scan.is_some() {
+            spans.push(Span::styled(
+                "  scanning…",
+                Style::default().fg(theme::ORANGE),
+            ));
+        }
+        if !self.filter.is_empty() {
+            spans.push(Span::styled("  /", theme::label()));
+            spans.push(Span::styled(
+                self.filter.clone(),
+                Style::default().fg(theme::YELLOW),
+            ));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+
+    fn draw_sources(&self, frame: &mut Frame, area: Rect) {
+        let items: Vec<ListItem> = self
+            .sources
+            .iter()
+            .enumerate()
+            .map(|(idx, (id, count))| {
+                let current = idx == self.source;
+                let (bar, style) = if current {
+                    (theme::CURSOR, theme::selected().fg(theme::FG))
+                } else {
+                    (" ", theme::body())
+                };
+                ListItem::new(Line::from(vec![
+                    Span::styled(bar, Style::default().fg(theme::BLUE)),
+                    Span::styled(format!("{} {:<7}", theme::source_glyph(id), id), style),
+                    Span::styled(format!("{count:>3}"), style.fg(theme::DIM)),
+                ]))
+            })
+            .collect();
+        frame.render_widget(List::new(items).block(theme::pane("sources", false)), area);
+    }
+
+    fn draw_packages(&mut self, frame: &mut Frame, area: Rect) {
+        let width = area.width.saturating_sub(2) as usize;
+        if self.items.is_empty() {
+            let text = if self.all.is_empty() {
+                "nothing to triage"
+            } else {
+                "nothing matches this filter"
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(text, theme::label())))
+                    .block(theme::pane("packages", true))
+                    .alignment(Alignment::Center),
+                area,
+            );
+            return;
+        }
+
+        let items: Vec<ListItem> = self
+            .items
+            .iter()
+            .map(|p| ListItem::new(package_row(p, width)))
+            .collect();
+        frame.render_stateful_widget(
+            List::new(items)
+                .block(theme::pane("packages", true))
+                .highlight_style(theme::selected())
+                .highlight_symbol(theme::CURSOR),
+            area,
+            &mut self.state,
+        );
+
+        // a bare list of seventy gives no sense of where you are in it
+        if self.items.len() > area.height.saturating_sub(2) as usize {
+            let mut scroll =
+                ScrollbarState::new(self.items.len()).position(self.state.selected().unwrap_or(0));
+            frame.render_stateful_widget(
+                Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                    .begin_symbol(None)
+                    .end_symbol(None)
+                    .thumb_style(Style::default().fg(theme::MUTED)),
+                area.inner(ratatui::layout::Margin {
+                    vertical: 1,
+                    horizontal: 0,
+                }),
+                &mut scroll,
+            );
+        }
+    }
+
+    fn draw_footer(&self, frame: &mut Frame, area: Rect) {
+        if let Some(message) = &self.message {
+            frame.render_widget(
+                Paragraph::new(Line::from(Span::styled(
+                    format!(" {message}"),
+                    Style::default().fg(theme::GREEN),
+                ))),
+                area,
+            );
+            return;
+        }
+        let keys = [
+            ("a", "adopt"),
+            ("q", "hold"),
+            ("d", "leave"),
+            ("x", "remove"),
+            ("i", "reinstall"),
+            ("e", "note"),
+            ("/", "filter"),
+            ("⇥", "source"),
+            ("?", "keys"),
+        ];
+        let mut spans = vec![Span::raw(" ")];
+        for (idx, (key, what)) in keys.iter().enumerate() {
+            if idx > 0 {
+                spans.push(Span::styled(" · ", theme::label()));
+            }
+            spans.push(Span::styled(*key, Style::default().fg(theme::PURPLE)));
+            spans.push(Span::styled(format!(" {what}"), theme::dim()));
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+
     fn counts(&self) -> (usize, usize, usize) {
         let mut counts = (0, 0, 0);
-        for pkg in &self.items {
+        for pkg in &self.all {
             match pkg.status {
                 Status::Pending => counts.0 += 1,
                 Status::Quarantined => counts.1 += 1,
@@ -815,81 +881,80 @@ impl<'a> App<'a> {
     }
 
     fn details(&self) -> Paragraph<'_> {
-        let block = Block::default().borders(Borders::ALL).title(" details ");
+        let block = theme::pane("details", false);
         let Some(pkg) = self.selected() else {
-            return Paragraph::new("nothing to triage").block(block);
+            return Paragraph::new(Line::from(Span::styled("nothing selected", theme::label())))
+                .block(block);
         };
+
         let mut lines = vec![
+            Line::from(Span::styled(
+                pkg.display().to_string(),
+                Style::default().fg(theme::FG).add_modifier(Modifier::BOLD),
+            )),
             Line::from(vec![
-                Span::styled("name    ", Style::default().fg(Color::DarkGray)),
-                Span::raw(pkg.key.clone()),
+                Span::styled(
+                    format!("{} {}", theme::source_glyph(&pkg.provider), pkg.provider),
+                    Style::default().fg(theme::BLUE),
+                ),
+                Span::styled("  ", theme::label()),
+                Span::styled(status_label(pkg), Style::default().fg(status_color(pkg))),
             ]),
-            Line::from(vec![
-                Span::styled("source  ", Style::default().fg(Color::DarkGray)),
-                Span::raw(pkg.provider.clone()),
-            ]),
-            Line::from(vec![
-                Span::styled("version ", Style::default().fg(Color::DarkGray)),
-                Span::raw(pkg.version.clone().unwrap_or_else(|| "-".into())),
-            ]),
-            Line::from(vec![
-                Span::styled("seen    ", Style::default().fg(Color::DarkGray)),
-                Span::raw(age(pkg.first_seen)),
-            ]),
+            Line::from(""),
+            field("version", pkg.version.clone().unwrap_or_else(|| "—".into())),
+            field("seen", age(pkg.first_seen)),
+            field(
+                "used",
+                match pkg.last_used {
+                    None => "no way to tell".to_string(),
+                    Some(0) => "never".to_string(),
+                    Some(at) => format!("{} ago", age(at)),
+                },
+            ),
         ];
-        lines.push(Line::from(vec![
-            Span::styled("used    ", Style::default().fg(Color::DarkGray)),
-            Span::raw(match pkg.last_used {
-                None => "no way to tell".to_string(),
-                Some(0) => "never".to_string(),
-                Some(at) => format!("{} ago", age(at)),
-            }),
-        ]));
+
         if let Ok(Some(command)) = self.db.last_command(&pkg.provider, &pkg.key) {
-            lines.push(Line::from(vec![
-                Span::styled("ran     ", Style::default().fg(Color::DarkGray)),
-                Span::raw(command),
-            ]));
+            lines.push(field("ran", command));
         }
         if let Some(note) = &pkg.note {
-            lines.push(Line::from(vec![
-                Span::styled("note    ", Style::default().fg(Color::DarkGray)),
-                Span::raw(note.clone()),
-            ]));
+            lines.push(field("note", note.clone()));
         }
         if let Some(at) = pkg.expires_at {
-            lines.push(Line::from(vec![
-                Span::styled("held    ", Style::default().fg(Color::DarkGray)),
-                Span::raw(format!("another {}", age(now() * 2 - at))),
-            ]));
+            lines.push(field("held", format!("another {}", age(now() * 2 - at))));
         }
         let elsewhere = crate::export::elsewhere(&self.others, &pkg.provider, &pkg.key);
         if !elsewhere.is_empty() {
-            lines.push(Line::from(vec![
-                Span::styled("also on ", Style::default().fg(Color::DarkGray)),
-                Span::raw(
-                    elsewhere
-                        .iter()
-                        .map(|(host, status)| format!("{host} ({status})"))
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                ),
-            ]));
+            lines.push(field(
+                "also on",
+                elsewhere
+                    .iter()
+                    .map(|(host, status)| format!("{host} ({status})"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ));
         }
+
         if pkg.status == Status::Drifted {
             lines.push(Line::from(""));
-            lines.push(Line::from(
+            lines.push(Line::from(Span::styled(
                 "declared in the manifest but not installed — the next apply puts it back",
-            ));
-            lines.push(Line::from("i reinstalls it here · x stops declaring it"));
+                Style::default().fg(theme::RED),
+            )));
+            lines.push(Line::from(vec![
+                Span::styled("i", Style::default().fg(theme::PURPLE)),
+                Span::styled(" reinstalls it here · ", theme::dim()),
+                Span::styled("x", Style::default().fg(theme::PURPLE)),
+                Span::styled(" stops declaring it", theme::dim()),
+            ]));
         }
+
         Paragraph::new(lines).block(block).wrap(Wrap { trim: true })
     }
 
     fn draw_form(&self, frame: &mut Frame, form: &Form) {
         let (title, lines) = match form.step {
             Step::Profile => (
-                " which machines? ",
+                "which machines?",
                 choices(
                     &form
                         .profiles
@@ -899,22 +964,18 @@ impl<'a> App<'a> {
                     form.profile,
                 ),
             ),
-            Step::Key => (" which list? ", choices(&form.keys, form.key)),
+            Step::Key => ("which list?", choices(&form.keys, form.key)),
             Step::Group => {
                 let mut options = vec!["end of the list".to_string()];
                 options.extend(form.groups.clone());
-                (" which group? ", choices(&options, form.group))
+                ("which group?", choices(&options, form.group))
             }
             Step::Comment => (
-                " comment ",
-                vec![
-                    Line::from(format!("{}_", form.comment)),
-                    Line::from(""),
-                    Line::from(Span::styled(
-                        "Enter to write it into the manifest · Esc to cancel",
-                        Style::default().fg(Color::DarkGray),
-                    )),
-                ],
+                "comment",
+                prompt_lines(
+                    &form.comment,
+                    "Enter to write it into the manifest · Esc to cancel",
+                ),
             ),
         };
         let height = (lines.len() + 2).min(14) as u16;
@@ -922,37 +983,69 @@ impl<'a> App<'a> {
     }
 }
 
+fn field(name: &str, value: String) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("{name:<8}"), theme::label()),
+        Span::styled(value, theme::body()),
+    ])
+}
+
+fn prompt_lines(text: &str, hint: &str) -> Vec<Line<'static>> {
+    vec![
+        Line::from(vec![
+            Span::styled(text.to_string(), theme::body()),
+            Span::styled("▏", Style::default().fg(theme::BLUE)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(hint.to_string(), theme::dim())),
+    ]
+}
+
 fn choices(options: &[String], selected: usize) -> Vec<Line<'static>> {
     options
         .iter()
         .enumerate()
         .map(|(idx, option)| {
-            let style = if idx == selected {
-                Style::default().add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            };
-            Line::from(Span::styled(format!("  {option}  "), style))
+            let current = idx == selected;
+            Line::from(vec![
+                Span::styled(
+                    if current { theme::CURSOR } else { " " },
+                    Style::default().fg(theme::BLUE),
+                ),
+                Span::styled(
+                    format!(" {option} "),
+                    if current {
+                        theme::selected().fg(theme::FG)
+                    } else {
+                        theme::body()
+                    },
+                ),
+            ])
         })
         .collect()
 }
 
 fn help_text() -> Vec<Line<'static>> {
     [
-        "j / k      move",
-        "a / Enter  adopt into the chezmoi manifest",
-        "q          hold: survive brew cleanup for 30 days",
-        "d          leave unmanaged, stop asking",
-        "x          uninstall here, or stop declaring a missing one",
-        "i          reinstall a declared package that went missing",
-        "e          write a note on why it is here",
-        "/          filter by name",
-        "Tab        next source · Shift-Tab previous",
-        "r          rescan",
-        "Esc        quit",
+        ("j / k", "move"),
+        ("a", "adopt into the chezmoi manifest"),
+        ("q", "hold: survive brew cleanup for 30 days"),
+        ("d", "leave unmanaged, stop asking"),
+        ("x", "uninstall here, or stop declaring a missing one"),
+        ("i", "reinstall a declared package that went missing"),
+        ("e", "write a note on why it is here"),
+        ("/", "filter by name"),
+        ("Tab", "next source · Shift-Tab previous"),
+        ("r", "rescan"),
+        ("Esc", "clear the filter, then quit"),
     ]
     .into_iter()
-    .map(Line::from)
+    .map(|(key, what)| {
+        Line::from(vec![
+            Span::styled(format!("{key:<10}"), Style::default().fg(theme::PURPLE)),
+            Span::styled(what, theme::body()),
+        ])
+    })
     .collect()
 }
 
@@ -965,20 +1058,24 @@ fn package_row(pkg: &Package, width: usize) -> Line<'static> {
     const GAP: usize = 2;
 
     let status = status_label(pkg);
+    // one more for the highlight symbol the list draws in front of the row
     let name_width = width
-        .saturating_sub(PROVIDER + GAP + status.chars().count())
+        .saturating_sub(PROVIDER + GAP + status.chars().count() + 1)
         .max(8);
 
     Line::from(vec![
         Span::styled(
             format!("{:<PROVIDER$}", fit(&pkg.provider, PROVIDER)),
-            Style::default().fg(Color::DarkGray),
+            theme::label(),
         ),
-        Span::raw(format!(
-            "{:<width$}",
-            fit(pkg.display(), name_width),
-            width = name_width + GAP
-        )),
+        Span::styled(
+            format!(
+                "{:<width$}",
+                fit(pkg.display(), name_width),
+                width = name_width + GAP
+            ),
+            theme::body(),
+        ),
         Span::styled(status, Style::default().fg(status_color(pkg))),
     ])
 }
@@ -1007,24 +1104,17 @@ fn status_label(pkg: &Package) -> String {
 
 fn status_color(pkg: &Package) -> Color {
     match pkg.status {
-        Status::Quarantined => Color::Cyan,
-        Status::Drifted => Color::Red,
-        _ if pkg.never_used(crate::report::SETTLED) => Color::Yellow,
-        _ => Color::DarkGray,
+        Status::Quarantined => theme::CYAN,
+        Status::Drifted => theme::RED,
+        _ if pkg.never_used(crate::report::SETTLED) => theme::YELLOW,
+        _ => theme::DIM,
     }
 }
 
 fn draw_modal(frame: &mut Frame, title: &str, body: Paragraph<'_>, height: u16) {
     let area = centered(frame.area(), 60, height);
     frame.render_widget(Clear, area);
-    frame.render_widget(
-        body.block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(title.to_string()),
-        ),
-        area,
-    );
+    frame.render_widget(body.block(theme::pane(title, true)), area);
 }
 
 fn centered(area: Rect, width_percent: u16, height: u16) -> Rect {
@@ -1120,7 +1210,7 @@ mod tests {
         assert!(screen.contains("mole"), "{screen}");
         assert!(screen.contains("google-chrome"), "{screen}");
         assert!(screen.contains("2 undecided"), "{screen}");
-        assert!(screen.contains("1 declared but missing"), "{screen}");
+        assert!(screen.contains("1 missing"), "{screen}");
     }
 
     #[test]
@@ -1274,6 +1364,121 @@ mod tests {
         press(&mut app, KeyCode::Esc);
         assert!(!app.quit, "esc should clear the filter before it quits");
         assert_eq!(app.items.len(), app.all.len());
+    }
+
+    /// Writes an HTML snapshot of the interface, for looking at the colours
+    /// outside a terminal. Only runs when PKGINBOX_PREVIEW names a file.
+    #[test]
+    fn preview() {
+        let Ok(path) = std::env::var("PKGINBOX_PREVIEW") else {
+            return;
+        };
+        let db = Db::open_in_memory().unwrap();
+        let rows: [(&str, &str, Status, Option<i64>); 14] = [
+            ("brew", "mole", Status::Pending, Some(now() - 86_400 * 2)),
+            ("brew", "vgmstream", Status::Pending, Some(0)),
+            ("brew", "ruff", Status::Quarantined, None),
+            ("brew", "hashicorp/tap/vault", Status::Drifted, None),
+            ("cask", "google-chrome", Status::Pending, Some(now() - 3600)),
+            ("cask", "thsnkhn/harbor/harbor", Status::Pending, Some(0)),
+            (
+                "cask",
+                "abue-ammar/tinycast/tinycast",
+                Status::Drifted,
+                None,
+            ),
+            (
+                "go",
+                "golang.org/x/tools/gopls@latest",
+                Status::Pending,
+                Some(now() - 86_400 * 9),
+            ),
+            (
+                "go",
+                "github.com/bayraktugrul/modview@latest",
+                Status::Pending,
+                Some(0),
+            ),
+            ("cargo", "cargo-update", Status::Pending, Some(0)),
+            ("app", "WezTerm.app", Status::Pending, Some(now() - 1800)),
+            ("app", "KORG Gadget.app", Status::Pending, Some(0)),
+            ("tap", "swchck/local", Status::Pending, None),
+            (
+                "claude",
+                "codspeed@claude-plugins-official",
+                Status::Drifted,
+                None,
+            ),
+        ];
+        for (provider, key, status, used) in rows {
+            let label = key.strip_suffix(".app").map(str::to_owned);
+            db.observe_unmanaged(provider, key, label.as_deref(), None)
+                .unwrap();
+            db.set_last_used(provider, key, used).unwrap();
+            if status != Status::Pending {
+                db.set_status(provider, key, status).unwrap();
+            }
+        }
+        db.backdate(86_400 * 40).unwrap();
+        db.set_note(
+            "cargo",
+            "cargo-update",
+            Some("keeps the rust tools current"),
+        )
+        .unwrap();
+
+        let state_dir = std::env::temp_dir().join("pkginbox-preview");
+        let f = Fixture {
+            db,
+            paths: Paths { state_dir },
+            data: ChezmoiData::from_json(DATA).unwrap(),
+        };
+        let mut app = app(&f);
+        app.state.select(Some(1));
+
+        let mut terminal = Terminal::new(TestBackend::new(118, 22)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        std::fs::write(path, html(terminal.backend().buffer())).unwrap();
+    }
+
+    fn html(buf: &ratatui::buffer::Buffer) -> String {
+        fn hex(color: ratatui::style::Color, fallback: &str) -> String {
+            match color {
+                ratatui::style::Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+                _ => fallback.to_string(),
+            }
+        }
+        let mut out = String::from(
+            "<!doctype html><meta charset=\"utf-8\"><title>pkginbox</title>\n             <body style=\"margin:0;background:#21252b;padding:24px\">\n             <pre style=\"font:14px/1.35 'JetBrainsMono Nerd Font','JetBrains Mono',\
+             ui-monospace,monospace;background:#282c34;color:#abb2bf;padding:18px;\
+             border-radius:10px;display:inline-block\">",
+        );
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let cell = &buf[(x, y)];
+                let fg = hex(cell.fg, "#abb2bf");
+                let bg = match cell.bg {
+                    ratatui::style::Color::Reset => String::new(),
+                    other => format!(";background:{}", hex(other, "#282c34")),
+                };
+                let bold = if cell.modifier.contains(ratatui::style::Modifier::BOLD) {
+                    ";font-weight:600"
+                } else {
+                    ""
+                };
+                let symbol = cell
+                    .symbol()
+                    .replace('&', "&amp;")
+                    .replace('<', "&lt;")
+                    .replace('>', "&gt;");
+                out.push_str(&format!(
+                    "<span style=\"color:{fg}{bg}{bold}\">{symbol}</span>"
+                ));
+            }
+            out.push('\n');
+        }
+        out.push_str("</pre></body>");
+        out
     }
 
     #[test]

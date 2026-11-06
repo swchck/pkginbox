@@ -11,6 +11,7 @@ mod record;
 mod report;
 mod scan;
 mod script;
+mod theme;
 mod tui;
 mod usage;
 mod util;
